@@ -51,7 +51,7 @@ impl RenderCommand {
     }
 }
 
-pub(super) struct RenderCommandQueue {
+pub struct RenderCommandQueue {
     pending: Mutex<VecDeque<RenderCommand>>,
     available: Condvar,
     capacity: usize,
@@ -59,7 +59,7 @@ pub(super) struct RenderCommandQueue {
 }
 
 impl RenderCommandQueue {
-    pub(super) fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
             pending: Mutex::new(VecDeque::with_capacity(capacity)),
             available: Condvar::new(),

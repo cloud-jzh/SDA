@@ -1,3 +1,7 @@
+[lib]
+name = "sda_native_renderer"
+path = "src/lib.rs"
+
 [package]
 name = "sda-native-renderer"
 version = "0.1.0"
