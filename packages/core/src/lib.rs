@@ -394,3 +394,123 @@ fn detect_codec(data: &[u8]) -> Option<&'static str> {
     }
     first_eac3.or(first_dts)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// JOC/Atmos E-AC-3 fixture from the harletty-bridge submodule
+    /// (requires `git submodule update --init`).
+    fn joc_fixture() -> Vec<u8> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../harletty-bridge/harletty/tests/fixtures/joc_atmos_1s.eac3"
+        );
+        std::fs::read(path)
+            .unwrap_or_else(|error| panic!("fixture missing ({error}); run `git submodule update --init`"))
+    }
+
+    /// Event JSON keys must stay camelCase and field-complete: the web app
+    /// (packages/core/index.ts) and the future Android bridge both consume
+    /// this exact shape.
+    #[test]
+    fn object_event_json_contract_is_camel_case() {
+        let event = ObjectEvent {
+            id: 10,
+            sample_pos: 1536,
+            has_pos: true,
+            pos: [-1.0, 1.0, 0.0],
+            gain_db: -3.5,
+            size: [0.1, 0.0, 0.2],
+            anchor: "room".into(),
+            distance_m: Some(1.5),
+            distance_infinite: false,
+            screen_factor: Some(0.8),
+            depth_factor: None,
+            ramp_duration: 1536,
+        };
+        let value: serde_json::Value = serde_json::to_value(&event).unwrap();
+        for key in [
+            "id",
+            "samplePos",
+            "hasPos",
+            "pos",
+            "gainDb",
+            "size",
+            "anchor",
+            "distanceM",
+            "distanceInfinite",
+            "screenFactor",
+            "depthFactor",
+            "rampDuration",
+        ] {
+            assert!(value.get(key).is_some(), "missing key {key} in {value}");
+        }
+        assert_eq!(value["samplePos"], 1536);
+        assert_eq!(value["gainDb"], -3.5);
+        assert_eq!(value["distanceM"], 1.5);
+        assert!(value["depthFactor"].is_null());
+    }
+
+    #[test]
+    fn decodes_joc_fixture_with_odd_chunking() {
+        let bytes = joc_fixture();
+        let mut decoder = StreamingDecoder::new("eac3").unwrap();
+        // Deliberately awkward chunking: the pipelines must re-frame.
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let take = if offset == 0 { 7 } else { 613 };
+            let end = (offset + take).min(bytes.len());
+            decoder.push(&bytes[offset..end]).unwrap();
+            offset = end;
+        }
+        decoder.flush();
+
+        let mut frames = Vec::new();
+        while let Some(frame) = decoder.next_frame() {
+            frames.push(frame);
+        }
+        assert!(!frames.is_empty(), "expected decoded frames");
+        assert_eq!(decoder.drain_errors(), Vec::<String>::new());
+
+        let first = &frames[0];
+        assert_eq!(first.sample_rate, 48000);
+        assert!(!first.channels.is_empty());
+        assert!(first.channels.iter().all(|c| !c.is_empty()));
+        assert!(
+            first.labels.iter().any(|l| l.starts_with("Obj_")),
+            "JOC fixture should carry object labels, got {:?}",
+            first.labels
+        );
+        assert!(
+            !first.object_channels.is_empty(),
+            "first frame must declare the object↔channel mapping"
+        );
+        // Events serialize through the same serde shape the web app parses.
+        let events_json = serde_json::to_string(&first.events).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&events_json).unwrap();
+        assert!(parsed.is_array());
+        assert!(first.sample_pos + first.channels[0].len() as u64 > 0);
+    }
+
+    #[test]
+    fn auto_detection_identifies_eac3() {
+        let bytes = joc_fixture();
+        let mut decoder = StreamingDecoder::new("auto").unwrap();
+        // Syncword sits at byte 0, so the very first push detects and decodes.
+        assert_eq!(decoder.codec_name(), "auto");
+        decoder.push(&bytes[..1000]).unwrap();
+        assert_eq!(decoder.codec_name(), "eac3");
+        decoder.push(&bytes[1000..]).unwrap();
+        decoder.flush();
+        assert!(decoder.next_frame().is_some(), "sniffed bytes must still decode");
+    }
+
+    #[test]
+    fn unknown_codec_and_bad_auto_stream_error_cleanly() {
+        assert!(StreamingDecoder::new("aac").is_err());
+        let mut decoder = StreamingDecoder::new("auto").unwrap();
+        let garbage = vec![0x12u8; 64 * 1024];
+        assert!(decoder.push(&garbage).is_err());
+    }
+}
