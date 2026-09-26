@@ -279,6 +279,90 @@ pub fn install_event_sink(sink: Arc<dyn EventSink>) {
     *EVENT_SINK.write().expect("event sink lock") = Some(sink);
 }
 
+/// Consumer of rendered stereo frames: pulls from the engine FIFO and
+/// delivers them to a platform device. Desktop sidecar: [`CpalOutput`].
+/// Android (T2.2): AAudio. Host verification: [`WavDumpOutput`].
+pub trait AudioOutput: Send + Sync {
+    fn run(
+        self: Arc<Self>,
+        fifo: Arc<stereo_fifo::StereoFifo>,
+        telemetry: Arc<RuntimeTelemetry>,
+        commands: Arc<render_command::RenderCommandQueue>,
+    );
+}
+
+/// Drains the engine FIFO into a 16-bit stereo WAV file and self-terminates
+/// once the FIFO has gone idle after producing audio. Host verification
+/// utility (plan T1.7); not a real-time output.
+pub struct WavDumpOutput {
+    pub path: std::path::PathBuf,
+    pub sample_rate: u32,
+}
+
+impl WavDumpOutput {
+    pub fn new(path: impl Into<std::path::PathBuf>, sample_rate: u32) -> Self {
+        Self { path: path.into(), sample_rate }
+    }
+}
+
+impl AudioOutput for WavDumpOutput {
+    fn run(
+        self: Arc<Self>,
+        fifo: Arc<stereo_fifo::StereoFifo>,
+        _telemetry: Arc<RuntimeTelemetry>,
+        _commands: Arc<render_command::RenderCommandQueue>,
+    ) {
+        let mut interleaved: Vec<f32> = Vec::new();
+        let mut block = [0.0_f32; 2048];
+        let mut idle_polls = 0_u32;
+        loop {
+            let popped = fifo.pop_into_f32(&mut block, 2);
+            if popped > 0 {
+                interleaved.extend_from_slice(&block[..popped]);
+                idle_polls = 0;
+            } else {
+                idle_polls += 1;
+                if interleaved.len() >= 48 && idle_polls >= 60 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        if interleaved.is_empty() {
+            return;
+        }
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(bytes) = encode_wav_i16(&interleaved, self.sample_rate) {
+            let _ = std::fs::write(&self.path, bytes);
+        }
+    }
+}
+
+/// Minimal 16-bit PCM WAV encoder (RIFF header + interleaved stereo).
+pub fn encode_wav_i16(interleaved: &[f32], sample_rate: u32) -> std::io::Result<Vec<u8>> {
+    let data_len = (interleaved.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16_u32.to_le_bytes()); // fmt chunk size
+    out.extend_from_slice(&1_u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&2_u16.to_le_bytes()); // stereo
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 4).to_le_bytes()); // byte rate
+    out.extend_from_slice(&4_u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16_u16.to_le_bytes()); // bits
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for sample in interleaved {
+        let clamped = sample.clamp(-1.0, 1.0);
+        out.extend_from_slice(&((clamped * 32767.0) as i16).to_le_bytes());
+    }
+    Ok(out)
+}
+
 /// Emit a renderer event through the installed sink (stdout JSONL by default).
 pub fn write_event(event: &Event) {
     let sink = EVENT_SINK.read().expect("event sink lock");
@@ -3148,6 +3232,91 @@ fn record_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T1.7 acceptance: the render worker drains engine PCM through the FIFO
+    /// into an AudioOutput implementation (WAV dump) without any platform
+    /// audio stack.
+    #[test]
+    fn render_worker_drains_engine_into_audio_output() {
+        let hrtf_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../web/public/hrtf/hrtf-set.json");
+        let mut engine = Engine::new(48000, 2);
+        engine
+            .replace_hrtf(
+                crate::hrtf::NativeHrtfSet::load_calibrated(&hrtf_path).unwrap(),
+                0.0,
+            )
+            .unwrap();
+        engine.paused = false;
+        engine.output_active = true;
+        engine.set_direct_objects(true).unwrap();
+        engine.direct_mix = 1.0;
+
+        let pcm: Vec<f32> = (0..24000).map(|i| (i as f32 * 0.043).sin() * 0.05).collect();
+        let mut source = Source {
+            kind: SourceKind::Object,
+            bed_label: None,
+            position: [0.0, 1.0, 0.0],
+            gain: 1.0,
+            target_gain: 1.0,
+            availability: 1.0,
+            availability_target: 1.0,
+            ..Default::default()
+        };
+        source.samples.write(0, 0, &pcm);
+        engine.sources.insert("obj:1".into(), source);
+        engine.route_source_now("obj:1", 0).unwrap();
+        engine
+            .pcm_coverage
+            .insert(0, pcm.len() as u64);
+
+        let commands = Arc::new(render_command::RenderCommandQueue::new(256));
+        let fifo = Arc::new(stereo_fifo::StereoFifo::new(STEREO_FIFO_CAPACITY_FRAMES));
+        let telemetry = Arc::new(RuntimeTelemetry::default());
+        spawn_render_worker(engine, commands.clone(), fifo.clone(), telemetry.clone());
+
+        let dump_path = std::env::temp_dir().join(format!(
+            "sda-worker-dump-{}-{}.wav",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        let sink = Arc::new(WavDumpOutput::new(&dump_path, 48000));
+        let sink_thread = {
+            let sink = sink.clone();
+            let fifo = fifo.clone();
+            let telemetry = telemetry.clone();
+            let commands = commands.clone();
+            std::thread::spawn(move || AudioOutput::run(sink, fifo, telemetry, commands))
+        };
+
+        // The sink self-terminates after the FIFO goes idle post-render.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !dump_path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Stop the render worker.
+        let _ = commands.push(render_command::RenderCommand::Command(Command::Shutdown));
+        sink_thread.join().unwrap();
+
+        let wav = std::fs::read(&dump_path).expect("WAV dump written");
+        assert!(wav.len() > 44 + 4800, "expected at least 1200 frames, got {}", wav.len());
+        let rms = {
+            let sum: f64 = wav[44..]
+                .chunks_exact(2)
+                .map(|s| {
+                    let v = i16::from_le_bytes([s[0], s[1]]) as f64 / 32768.0;
+                    v * v
+                })
+                .sum();
+            (sum / ((wav.len() - 44) / 2) as f64).sqrt()
+        };
+        assert!(rms > 0.01, "rendered audio must be non-silent, rms={rms}");
+        let _ = std::fs::remove_file(&dump_path);
+    }
+
 
     fn calibrated_engine() -> Engine {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -1761,4 +1761,19 @@ mod platform {
     }
 }
 
+/// Desktop CPAL-backed output (WASAPI/ASIO on Windows, ALSA/PipeWire
+/// elsewhere); no-op when built without the `cpal-output` feature.
+pub struct CpalOutput;
+
+impl crate::AudioOutput for CpalOutput {
+    fn run(
+        self: Arc<Self>,
+        fifo: Arc<stereo_fifo::StereoFifo>,
+        telemetry: Arc<RuntimeTelemetry>,
+        commands: Arc<render_command::RenderCommandQueue>,
+    ) {
+        platform::run(fifo, telemetry, commands)
+    }
+}
+
 pub use platform::run;
