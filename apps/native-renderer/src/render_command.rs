@@ -13,7 +13,7 @@ use super::Command;
 
 const MAX_QUEUED_PCM_BYTES: usize = 16 * 1024 * 1024;
 
-pub(super) enum RenderCommand {
+pub enum RenderCommand {
     Command(Command),
     Pcm {
         id: String,
@@ -70,7 +70,7 @@ impl RenderCommandQueue {
 
     /// Never waits for the render worker: stdin backpressure must not couple to
     /// the real-time output path. Callers receive a protocol rejection on full.
-    pub(super) fn push(&self, command: RenderCommand) -> Result<(), RenderCommand> {
+    pub fn push(&self, command: RenderCommand) -> Result<(), RenderCommand> {
         let bytes = command.pcm_bytes();
         let mut pending = self.pending.lock().expect("render command queue poisoned");
         let mut queued_pcm_bytes = self

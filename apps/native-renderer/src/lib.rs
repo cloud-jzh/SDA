@@ -309,7 +309,7 @@ impl AudioOutput for WavDumpOutput {
     fn run(
         self: Arc<Self>,
         fifo: Arc<stereo_fifo::StereoFifo>,
-        _telemetry: Arc<RuntimeTelemetry>,
+        telemetry: Arc<RuntimeTelemetry>,
         _commands: Arc<render_command::RenderCommandQueue>,
     ) {
         let mut interleaved: Vec<f32> = Vec::new();
@@ -320,9 +320,20 @@ impl AudioOutput for WavDumpOutput {
             if popped > 0 {
                 interleaved.extend_from_slice(&block[..popped]);
                 idle_polls = 0;
+                // Device-callback contract: report consumption on the codec
+                // clock so hosts can derive the presentation position.
+                telemetry
+                    .callback_consumed_sample_pos
+                    .fetch_add(popped as u64, std::sync::atomic::Ordering::Release);
             } else {
+                // Device-callback contract: acknowledge producer flush epochs
+                // (seek/pause) or the render worker blocks forever waiting.
+                fifo.apply_flush_from_consumer();
                 idle_polls += 1;
-                if interleaved.len() >= 48 && idle_polls >= 60 {
+                // Exit after rendered+drained audio settled, or after a hard
+                // idle ceiling so hosts/tests cannot leak this thread when
+                // nothing ever renders.
+                if (interleaved.len() >= 48 && idle_polls >= 60) || idle_polls >= 600 {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -485,6 +496,39 @@ pub struct NativeObjectEvent {
     distance_infinite: bool,
     #[serde(default = "default_object_ramp")]
     ramp_duration: u32,
+}
+
+impl NativeObjectEvent {
+    /// Build from the sda-core decoder contract (mobile feed path). Codec
+    /// zone-exclusion metadata is not carried across this boundary; hosts
+    /// needing it should extend this constructor deliberately.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_decoder_contract(
+        id: u32,
+        sample_pos: u64,
+        has_pos: bool,
+        pos: [f32; 3],
+        gain_db: f32,
+        size: [f32; 3],
+        distance_m: Option<f32>,
+        distance_infinite: bool,
+        ramp_duration: u32,
+    ) -> Self {
+        Self {
+            id,
+            sample_pos,
+            has_pos,
+            pos,
+            gain_db,
+            size,
+            diffuse: 0.0,
+            horizontal_only: false,
+            zone_exclusion: Vec::new(),
+            distance_m,
+            distance_infinite,
+            ramp_duration,
+        }
+    }
 }
 
 pub fn default_object_ramp() -> u32 {
@@ -757,8 +801,9 @@ impl ObjectActivitySnapshot {
 #[derive(Default)]
 pub struct RuntimeTelemetry {
     callback_output_enabled: AtomicBool,
-    /// Codec timeline consumed by WASAPI, never the worker's render-ahead clock.
-    callback_consumed_sample_pos: AtomicU64,
+    /// Codec timeline consumed by the audio output, never the worker's
+    /// render-ahead clock. Read by mobile hosts as the presentation clock.
+    pub callback_consumed_sample_pos: AtomicU64,
     callback_count: AtomicU64,
     callback_max_micros: AtomicU64,
     callback_fifo_underrun_frames: AtomicU64,
@@ -933,6 +978,13 @@ impl Engine {
         } else {
             1.0
         }
+    }
+
+    /// Mobile/host entry: mark the output as live. The desktop sidecar sets
+    /// this via protocol once the device callback is pulling; engine-only
+    /// hosts flip it directly at start.
+    pub fn set_output_active(&mut self, active: bool) {
+        self.output_active = active;
     }
 
     pub fn new(sample_rate: u32, channels: u16) -> Self {
@@ -1128,7 +1180,7 @@ impl Engine {
             && spatial::adm_to_spherical(source.position).elevation > layout_ceiling + 0.5
     }
 
-    fn replace_hrtf(&mut self, mut set: hrtf::NativeHrtfSet, wet: f32) -> Result<(), String> {
+    pub fn replace_hrtf(&mut self, mut set: hrtf::NativeHrtfSet, wet: f32) -> Result<(), String> {
         set.configure_cinema(self.cinema.clone(), self.room_profile.clone());
         let bus = bus_renderer::BusRenderer::new(&set, &self.vbap, wet)?;
         direct_renderer::warm_banks(&mut set, &self.vbap, wet)?;
