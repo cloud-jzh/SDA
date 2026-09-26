@@ -1,11 +1,11 @@
 //! Windows MMCSS registration for threads that feed or render live audio.
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "cpal-output"))]
 pub(super) struct ProAudio(
     Option<windows::Win32::Foundation::HANDLE>,
 );
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "cpal-output"))]
 impl ProAudio {
     pub(super) fn enter() -> Self {
         use windows::{
@@ -31,7 +31,7 @@ impl ProAudio {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "cpal-output"))]
 impl Drop for ProAudio {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {
@@ -42,10 +42,10 @@ impl Drop for ProAudio {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "cpal-output")))]
 pub(super) struct ProAudio;
 
-#[cfg(not(windows))]
+#[cfg(not(all(windows, feature = "cpal-output")))]
 impl ProAudio {
     pub(super) fn enter() -> Self {
         Self
