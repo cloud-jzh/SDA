@@ -1,0 +1,114 @@
+name: Android port CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/android-port
+
+permissions:
+  contents: read
+
+jobs:
+  windows-sidecar:
+    # Clean-environment validation of the windows crate build that fails on
+    # the dev machine (STATUS_HEAP_CORRUPTION): full sidecar with the desktop
+    # audio stack (default features, cpal-output).
+    name: Windows sidecar build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/native-renderer
+
+      - name: Build sidecar (default features: cpal-output)
+        run: cargo build --release --locked
+        working-directory: apps/native-renderer
+
+  linux-tests:
+    # Host-side engine tests without the desktop audio stack, mirroring the
+    # dev-machine --no-default-features runs.
+    name: Engine tests (Linux host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/native-renderer
+            packages/core
+            crates/sda-native
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Prepare AC-4 spec tables
+        run: node scripts/prepare-ac4.mjs
+
+      - name: Test native-renderer (engine only)
+        run: cargo test --no-default-features
+        working-directory: apps/native-renderer
+
+      - name: Test sda-core
+        run: cargo test --no-default-features
+        working-directory: packages/core
+        env:
+          MACINDECODE_AC4_SPEC_DIR: ${{ github.workspace }}/tmp/MacinDecode-AC4-Core/spec
+
+      - name: Test sda-native
+        run: cargo test --no-default-features
+        working-directory: crates/sda-native
+        env:
+          MACINDECODE_AC4_SPEC_DIR: ${{ github.workspace }}/tmp/MacinDecode-AC4-Core/spec
+
+  android-check:
+    # Cross-compile gate for the mobile engine (plan T1.6 acceptance).
+    name: Android arm64 check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          targets: aarch64-linux-android
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Prepare AC-4 spec tables
+        run: node scripts/prepare-ac4.mjs
+
+      - name: Check sda-native for arm64-v8a
+        run: cargo ndk -t arm64-v8a --platform 26 -- check --no-default-features
+        working-directory: crates/sda-native
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          MACINDECODE_AC4_SPEC_DIR: ${{ github.workspace }}/tmp/MacinDecode-AC4-Core/spec
