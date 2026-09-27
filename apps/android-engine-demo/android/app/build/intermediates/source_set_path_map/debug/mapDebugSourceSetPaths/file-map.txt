@@ -1,0 +1,7 @@
+com.sda.engine.app-pngs-0 D:\code\study\SDA\apps\android-engine-demo\android\app\build\generated\res\pngs\debug
+com.sda.engine.app-resValues-1 D:\code\study\SDA\apps\android-engine-demo\android\app\build\generated\res\resValues\debug
+com.sda.engine.app-packageDebugResources-2 D:\code\study\SDA\apps\android-engine-demo\android\app\build\intermediates\incremental\debug\packageDebugResources\merged.dir
+com.sda.engine.app-packageDebugResources-3 D:\code\study\SDA\apps\android-engine-demo\android\app\build\intermediates\incremental\debug\packageDebugResources\stripped.dir
+com.sda.engine.app-debug-4 D:\code\study\SDA\apps\android-engine-demo\android\app\build\intermediates\merged_res\debug\mergeDebugResources
+com.sda.engine.app-debug-5 D:\code\study\SDA\apps\android-engine-demo\android\app\src\debug\res
+com.sda.engine.app-main-6 D:\code\study\SDA\apps\android-engine-demo\android\app\src\main\res

@@ -47,7 +47,9 @@ const OBJECT_ACTIVITY_THRESHOLD: f32 = 0.001;
 // Preserve DAC-aligned activity through the synchronized prebuffer window.
 const OBJECT_ACTIVITY_QUEUE_CAPACITY: usize = 512;
 
-pub mod adm_zone;
+#[cfg(target_os = "android")]
+pub mod aaudio_output;
+mod adm_zone;
 pub mod bus_renderer;
 pub mod callback_output;
 pub mod cinema;
@@ -3237,7 +3239,7 @@ pub fn spawn_render_worker(
 }
 
 
-fn record_callback(
+pub(crate) fn record_callback(
     telemetry: &RuntimeTelemetry,
     started: Instant,
     requested: usize,

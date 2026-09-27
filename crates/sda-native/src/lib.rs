@@ -297,6 +297,13 @@ impl MobileEngine {
         Some(snapshot)
     }
 
+        /// Start with the platform output: AAudio blocking-write sink (T2.2).
+    /// Android only; hosts elsewhere construct their own AudioOutput.
+    #[cfg(target_os = "android")]
+    pub fn start_android(&mut self) -> EngineResult<()> {
+        self.start(Arc::new(sda_native_renderer::aaudio_output::AAudioWriterSink::default()))
+    }
+
     /// Codec in use (meaningful after auto-detection).
     pub fn codec_name(&self) -> &str {
         self.decoder.codec_name()
@@ -373,6 +380,9 @@ fn native_object_event(event: &ObjectEvent) -> NativeObjectEvent {
         event.ramp_duration,
     )
 }
+
+#[cfg(target_os = "android")]
+pub mod jni;
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,120 @@
+//! JNI boundary for the Android host (plan T2.4 first slice). Exported for
+//! `com.sda.engine.MainActivity`; keeps the handle as a raw `MobileEngine`
+//! pointer (long). PCM never crosses this boundary — hosts only see metadata
+//! (`DecodeStatus`) and the playback watermark.
+
+use jni::objects::{JByteArray, JClass, JString};
+use jni::sys::{jbyteArray, jint, jlong};
+use jni::JNIEnv;
+
+use crate::{EngineConfig, MobileEngine};
+
+fn android_log(message: &str) {
+    extern "C" {
+        fn __android_log_write(prio: i32, tag: *const u8, text: *const u8) -> i32;
+    }
+    let tag = b"SdaEngine\0".to_vec();
+    let mut text = message.as_bytes().to_vec();
+    text.push(0);
+    unsafe {
+        __android_log_write(4, tag.as_ptr(), text.as_ptr());
+    }
+}
+
+fn take_engine(ptr: jlong) -> Option<&'static mut MobileEngine> {
+    if ptr == 0 {
+        None
+    } else {
+        Some(unsafe { &mut *(ptr as *mut MobileEngine) })
+    }
+}
+
+/// `nativeInit(configJson: String, hrtfPath: String): Long` — engine handle,
+/// or 0 on failure. Empty `hrtfPath` skips HRTF (renders without
+/// spatialization rather than failing).
+#[no_mangle]
+pub extern "system" fn Java_com_sda_engine_MainActivity_nativeInit(
+    mut env: JNIEnv,
+    _class: JClass,
+    config_json: JString,
+    hrtf_path: JString,
+) -> jlong {
+    let config: String = match env.get_string(&config_json) {
+        Ok(value) => value.into(),
+        Err(_) => return 0,
+    };
+    let hrtf: String = match env.get_string(&hrtf_path) {
+        Ok(value) => value.into(),
+        Err(_) => return 0,
+    };
+    let config: EngineConfig = match serde_json::from_str(&config) {
+        Ok(value) => value,
+        Err(error) => {
+            android_log(&format!("config parse failed: {error}"));
+            return 0;
+        }
+    };
+    match MobileEngine::new(config, None) {
+        Ok(mut engine) => {
+            if !hrtf.is_empty() {
+                if let Err(error) = engine.load_hrtf(&hrtf) {
+                    android_log(&format!("hrtf load failed: {error}"));
+                    return 0;
+                }
+            }
+            Box::into_raw(Box::new(engine)) as jlong
+        }
+        Err(_) => 0,
+    }
+}
+
+/// `nativeStart(ptr: Long): Int` — 0 on success.
+#[no_mangle]
+pub extern "system" fn Java_com_sda_engine_MainActivity_nativeStart(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jint {
+    match take_engine(ptr) {
+        Some(engine) => match engine.start_android() {
+            Ok(()) => 0,
+            Err(_) => -1,
+        },
+        None => -2,
+    }
+}
+
+/// `nativeFeed(ptr: Long, bytes: ByteArray): Int` — decoded frame count, or
+/// negative on error.
+#[no_mangle]
+pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFeed(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    bytes: jbyteArray,
+) -> jint {
+    let Some(engine) = take_engine(ptr) else {
+        return -2;
+    };
+    let array = unsafe { JByteArray::from_raw(bytes) };
+    let data = match env.convert_byte_array(&array) {
+        Ok(value) => value,
+        Err(_) => return -3,
+    };
+    match engine.feed(&data) {
+        Ok(status) => status.frames_pushed as jint,
+        Err(_) => -1,
+    }
+}
+
+/// `nativeClose(ptr: Long)`
+#[no_mangle]
+pub extern "system" fn Java_com_sda_engine_MainActivity_nativeClose(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) {
+    if ptr != 0 {
+        drop(unsafe { Box::from_raw(ptr as *mut MobileEngine) });
+    }
+}

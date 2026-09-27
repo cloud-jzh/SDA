@@ -811,6 +811,7 @@ dependencies = [
 name = "sda-native"
 version = "0.1.0"
 dependencies = [
+ "jni",
  "sda-core",
  "sda-native-renderer",
  "serde",
