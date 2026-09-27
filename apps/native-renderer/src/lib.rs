@@ -341,7 +341,7 @@ impl AudioOutput for WavDumpOutput {
                 );
             }
             if popped > 0 {
-                interleaved.extend_from_slice(&block[..popped]);
+                interleaved.extend_from_slice(&block[..popped * 2]);
                 idle_polls = 0;
                 // Device-callback contract: report consumption on the codec
                 // clock so hosts can derive the presentation position.
@@ -847,6 +847,7 @@ impl ObjectActivitySnapshot {
 
 #[derive(Default)]
 pub struct RuntimeTelemetry {
+    pub shutdown_requested: AtomicBool,
     callback_output_enabled: AtomicBool,
     /// Codec timeline consumed by the audio output, never the worker's
     /// render-ahead clock. Read by mobile hosts as the presentation clock.
@@ -3168,6 +3169,9 @@ pub fn spawn_render_worker(
             let mut pending_mirror_seed: Option<(usize, Vec<f32>)> = None;
             let mut pending_fifo_flush = None;
             loop {
+                if telemetry.shutdown_requested.load(Ordering::Acquire) {
+                    return;
+                }
                 for _ in 0..16 {
                     let Some(command) = commands.pop() else {
                         break;
@@ -3452,6 +3456,32 @@ mod tests {
         engine.render_into(&mut block, 2);
         let peak = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 0.0, "render silent, peak={peak}");
+        // Spectral purity: the input is a 328.5 Hz sine (0.043 rad/sample at
+        // 48 kHz). The rendered left channel must concentrate its energy
+        // there - broadband energy of the same order means the render path
+        // distorts (the "electric buzz" symptom reported on device).
+        let goertzel = |samples: &[f32], freq: f64| -> f64 {
+            let w = 2.0 * std::f64::consts::PI * freq / 48000.0;
+            let coeff = 2.0 * w.cos();
+            let (mut s1, mut s2) = (0.0f64, 0.0f64);
+            for &x in samples {
+                let s0 = x as f64 + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            (s1 * s1 + s2 * s2 - coeff * s1 * s2).sqrt() / samples.len() as f64
+        };
+        let left: Vec<f32> = block.chunks_exact(2).map(|f| f[0]).collect();
+        let e_signal = goertzel(&left[4000..], 328.5);
+        let e_off1 = goertzel(&left[4000..], 1000.0);
+        let e_off2 = goertzel(&left[4000..], 5000.0);
+        println!(
+            "SPECTRAL signal(328Hz)={e_signal:.6} off1(1kHz)={e_off1:.6} off2(5kHz)={e_off2:.6}"
+        );
+        assert!(
+            e_signal > e_off1 * 20.0 && e_signal > e_off2 * 20.0,
+            "render output is not spectrally pure: signal={e_signal} off1={e_off1} off2={e_off2}"
+        );
     }
 
     /// T1.7 acceptance: the render worker drains engine PCM through the FIFO

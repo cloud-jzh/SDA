@@ -180,14 +180,12 @@ impl MobileEngine {
         // worker owns (mirrors the desktop Play flow).
         let _ = commands
             .push(render_command::RenderCommand::Command(Command::Pause { paused: false }));
-        // Desktop-equivalent configuration stream: the Electron shell always
-        // selects a speaker layout before playback; without it the VBAP
-        // solver is empty and every route is silent.
+        // Apply the requested virtual-speaker layout before PCM is submitted.
         let _ = commands.push(render_command::RenderCommand::Command(
             Command::SetLayout { layout: self.config.layout.clone() },
         ));
         self.pipeline = Some(RenderPipeline { fifo: fifo.clone(), commands: commands.clone(), telemetry: telemetry.clone() });
-        self.drain_pending_into_pipeline();
+        self.drain_pending_into_pipeline()?;
         // Start the output last, on its own thread: AudioOutput::run owns a
         // long-lived loop and must never block the caller - a blocking
         // implementation (WavDump) exiting before the worker's first
@@ -221,23 +219,28 @@ impl MobileEngine {
     pub fn feed(&mut self, data: &[u8]) -> EngineResult<DecodeStatus> {
         self.decoder.push(data)?;
         let mut frames_pushed = 0_u32;
-        let mut sample_pos = 0_u64;
+        let mut sample_pos = self.decoded_sample_pos();
         {
             let mut pending = self.pending.lock().expect("pending lock");
             while let Some(frame) = self.decoder.next_frame() {
-                sample_pos = frame.sample_pos;
+                sample_pos = frame.sample_pos + frame.channels.first().map_or(0, |pcm| pcm.len()) as u64;
                 pending.push_back(frame);
                 frames_pushed += 1;
             }
         }
         *self.newest_sample_pos.lock().expect("clock lock") = sample_pos;
-        self.drain_pending_into_pipeline();
+        self.drain_pending_into_pipeline()?;
         Ok(DecodeStatus {
             codec: self.decoder.codec_name().to_string(),
             frames_pushed,
             sample_pos,
             errors: self.decoder.drain_errors(),
         })
+    }
+
+    pub fn finish(&mut self) -> EngineResult<DecodeStatus> {
+        self.decoder.flush();
+        self.feed(&[])
     }
 
     /// Codec clock of the newest decoded frame (samples @ config.sample_rate).
@@ -292,6 +295,24 @@ impl MobileEngine {
         Ok(())
     }
 
+    pub fn set_volume(&self, volume: f32) -> EngineResult<()> {
+        if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
+            return Err("volume must be between 0 and 1".into());
+        }
+        let pipeline = self.pipeline.as_ref().ok_or("engine not started")?;
+        pipeline.commands
+            .push(render_command::RenderCommand::Command(Command::SetVolume { volume }))
+            .map_err(|_| "command queue full".into())
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(pipeline) = self.pipeline.take() {
+            pipeline.telemetry.shutdown_requested.store(true, std::sync::atomic::Ordering::Release);
+            let _ = pipeline.commands.push(render_command::RenderCommand::Command(Command::Shutdown));
+        }
+        self.pending.lock().expect("pending lock").clear();
+    }
+
     pub fn set_paused(&mut self, paused: bool) -> EngineResult<()> {
         let Some(pipeline) = &self.pipeline else {
             return Err("engine not started".into());
@@ -336,23 +357,22 @@ impl MobileEngine {
     }
 
     /// Drains queued FrameData into the render pipeline once started.
-    fn drain_pending_into_pipeline(&mut self) {
-        let Some(pipeline) = &self.pipeline else { return };
+    fn drain_pending_into_pipeline(&mut self) -> EngineResult<()> {
+        let Some(pipeline) = &self.pipeline else { return Ok(()) };
         let mut pending = self.pending.lock().expect("pending lock");
-        let (mut pcm_ok, mut pcm_err) = (0_usize, 0_usize);
         while let Some(frame) = pending.pop_front() {
             for label in &frame.labels {
                 let mut declared = self.declared_sources.lock().expect("sources lock");
                 if !declared.iter().any(|existing| existing == label) {
                     let id = source_id(label);
                     let bed_label = (!label.starts_with("Obj_")).then(|| label.to_string());
-                    let _ = pipeline.commands.push(
+                    pipeline.commands.push(
                         render_command::RenderCommand::Command(Command::AddSource {
                             id,
                             at: None,
                             bed_label,
                         }),
-                    );
+                    ).map_err(|_| "source declaration queue is full")?;
                     declared.push(label.clone());
                 }
             }
@@ -367,30 +387,27 @@ impl MobileEngine {
                 .iter()
                 .map(native_object_event)
                 .collect();
-            match pipeline.commands.push(
+            pipeline.commands.push(
                 render_command::RenderCommand::PcmFrame {
                     start: frame.sample_pos,
                     entries,
                     events,
                 },
-            ) {
-                Ok(()) => pcm_ok += 1,
-                Err(_) => pcm_err += 1,
-            }
+            ).map_err(|_| "PCM command queue is full; feed must be paced")?;
         }
-        eprintln!(
-            "drain: pending_left={} pcm_ok={} pcm_err={} cmdq_len={}",
-            pending.len(),
-            pcm_ok,
-            pcm_err,
-            pipeline.commands.pending_len_for_debug(),
-        );
+        Ok(())
     }
 
     /// Drains queued frames (test accessor; FFI hosts do not see PCM).
     pub fn take_pending_frames(&self) -> Vec<FrameData> {
         let mut pending = self.pending.lock().expect("pending lock");
         pending.drain(..).collect()
+    }
+}
+
+impl Drop for MobileEngine {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -507,7 +524,7 @@ mod tests {
         let wav = std::fs::read(&dump).expect("dump readable");
         let frames = (wav.len() - 44) / 4;
         let mut envelope = Vec::new();
-        for chunk in wav[44..].chunks(4800 * 2) {
+        for chunk in wav[44..].chunks(4800 * 4) {
             let rms = (chunk
                 .chunks_exact(2)
                 .map(|s| {
@@ -563,7 +580,7 @@ mod tests {
         let wav = std::fs::read(&dump).expect("dump readable");
         let frames = (wav.len() - 44) / 4;
         let mut envelope = Vec::new();
-        for chunk in wav[44..].chunks(4800 * 2) {
+        for chunk in wav[44..].chunks(4800 * 4) {
             let rms = (chunk
                 .chunks_exact(2)
                 .map(|s| {
@@ -612,7 +629,7 @@ mod tests {
         let wav = std::fs::read(&dump).expect("dump written");
         let frames = (wav.len() - 44) / 4;
         let mut envelope = Vec::new();
-        let window = 4800 * 2;
+        let window = 4800 * 4;
         for chunk in wav[44..].chunks(window) {
             let rms = (chunk
                 .chunks_exact(2)
@@ -674,19 +691,7 @@ mod tests {
         assert!(error.contains("stereo"));
     }
 
-    /// T1.8: the presentation clock and watermark come from the render
-    /// pipeline's consumption telemetry, fed by a WAV dump output.
-    ///
-    /// T1.8: the presentation clock and watermark come from the render
-    /// pipeline consumption telemetry, fed by a WAV dump output.
-    /// Still failing after the activity/availability/layout fixes: every
-    /// PcmFrame is rejected by the worker-side validation (batchAck
-    /// accepted:false) while the same fixture passes sda-core decode tests
-    /// with zero non-finite samples. Diagnostic batchAck detail added in
-    /// protocol.rs to identify the failing clause; next session continues
-    /// from the reported detail string.
     #[test]
-    #[ignore = "PcmFrame rejection root cause not yet identified; see comment"]
     fn playback_status_tracks_consumed_clock() {
         let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
         let hrtf = concat!(

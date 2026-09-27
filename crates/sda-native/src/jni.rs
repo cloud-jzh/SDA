@@ -103,7 +103,10 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFeed(
     };
     match engine.feed(&data) {
         Ok(status) => status.frames_pushed as jint,
-        Err(_) => -1,
+        Err(error) => {
+            android_log(&format!("feed failed: {error}"));
+            -1
+        },
     }
 }
 
@@ -124,6 +127,33 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeStatus(
     env.new_string(json)
         .map(|value| value.into_raw())
         .unwrap_or_else(|_| std::ptr::null_mut())
+}
+
+/// `nativeFinish(ptr: Long): Int` — drains the decoder's final frame.
+#[no_mangle]
+pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFinish(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jint {
+    match take_engine(ptr) {
+        Some(engine) => engine.finish().map(|status| status.frames_pushed as jint).unwrap_or(-1),
+        None => -2,
+    }
+}
+
+/// `nativeSetVolume(ptr: Long, volume: Float): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_sda_engine_MainActivity_nativeSetVolume(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    volume: jni::sys::jfloat,
+) -> jint {
+    match take_engine(ptr) {
+        Some(engine) => engine.set_volume(volume).map(|_| 0).unwrap_or(-1),
+        None => -2,
+    }
 }
 
 /// `nativeClose(ptr: Long)`

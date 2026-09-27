@@ -2,7 +2,11 @@ package com.sda.engine
 
 import android.app.Activity
 import android.os.Bundle
+import android.util.Log
+import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONObject
 import java.io.File
 
 class MainActivity : Activity() {
@@ -12,73 +16,148 @@ class MainActivity : Activity() {
     private external fun nativeStart(ptr: Long): Int
     private external fun nativeFeed(ptr: Long, bytes: ByteArray): Int
     private external fun nativeStatus(ptr: Long): String
+    private external fun nativeFinish(ptr: Long): Int
+    private external fun nativeSetVolume(ptr: Long, volume: Float): Int
     private external fun nativeClose(ptr: Long)
+
+    @Volatile private var stopRequested = false
+    private var worker: Thread? = null
+    private lateinit var status: TextView
+    private lateinit var play: Button
+    private lateinit var stop: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val tv = TextView(this)
-        tv.textSize = 16f
-        tv.setPadding(48, 96, 48, 48)
-        setContentView(tv)
-
-        // Stage engine inputs from assets to filesDir (JNI takes real paths).
-        // HRTF is a whole directory: hrtf-set.json references the FIR files
-        // relative to itself, so all of them must sit side by side.
-        val hrtfDir = File(filesDir, "hrtf")
-        hrtfDir.mkdirs()
-        for (name in assets.list("hrtf") ?: emptyArray()) {
-            assets.open("hrtf/$name").use { input ->
-                File(hrtfDir, name).outputStream().use { output -> input.copyTo(output) }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 80, 48, 48)
+        }
+        layout.addView(TextView(this).apply {
+            text = "SDA · 真歌试听"
+            textSize = 24f
+        })
+        status = TextView(this).apply {
+            textSize = 18f
+            text = "已就绪，点击播放。默认 25% 音量。\n播放时可随时停止；离开页面也会停止。"
+            setPadding(0, 24, 0, 24)
+        }
+        play = Button(this).apply {
+            text = "播放歌曲（低音量）"
+            setOnClickListener { startPlayback(false) }
+        }
+        stop = Button(this).apply {
+            text = "停止"
+            isEnabled = false
+            setOnClickListener {
+                stopRequested = true
+                isEnabled = false
+                status.text = "正在停止…"
             }
         }
-        val stream = File(filesDir, "song.eac3")
-        assets.open("song.eac3").use { input ->
-            stream.outputStream().use { output -> input.copyTo(output) }
-        }
+        layout.addView(status)
+        layout.addView(play)
+        layout.addView(stop)
+        setContentView(layout)
 
-        val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
-        val hrtfJson = File(hrtfDir, "hrtf-set.json").absolutePath
-        val ptr = nativeInit(config, hrtfJson)
-        if (ptr == 0L) {
-            tv.text = "nativeInit failed (see logcat: SdaEngine)"
-            return
+        // Automated validation explicitly requests silence; normal launches never autoplay.
+        if (intent.getBooleanExtra("validationMuted", false)) {
+            startPlayback(true)
         }
-        val rc = nativeStart(ptr)
-        if (rc != 0) {
-            tv.text = "nativeStart failed: $rc"
-            nativeClose(ptr)
-            return
-        }
+    }
 
-        // Feed with clock-drift-free backpressure: keep the decoded codec
-        // clock at most ~2 s ahead of the consumption clock reported by the
-        // engine. Fixed-sleep pacing drifts against the audio device clock
-        // and corrupts the ring over a long file.
-        Thread {
-            val bytes = stream.readBytes()
-            val chunk = 24 * 1024
-            val maxLead = 2L * 48000L
-            var fed = 0
-            var lastPushed = 0
-            while (fed < bytes.size) {
-                val rawStatus = nativeStatus(ptr)
-                if (fed == 0) android.util.Log.i("SdaEngine", "status=$rawStatus")
-                val obj = org.json.JSONObject(rawStatus)
-                val decoded = obj.optLong("decodedSamplePos")
-                val consumed = obj.optLong("consumedSamplePos")
-                if (decoded - consumed > maxLead) {
-                    Thread.sleep(20)
-                    continue
+    private fun startPlayback(muted: Boolean) {
+        if (worker != null) return
+        stopRequested = false
+        play.isEnabled = false
+        stop.isEnabled = true
+        status.text = "正在准备音频…"
+        worker = Thread({
+            var ptr = 0L
+            var resultText = "已停止，可重新播放。"
+            try {
+                val hrtfDir = File(filesDir, "hrtf").apply { mkdirs() }
+                for (name in assets.list("hrtf") ?: emptyArray()) {
+                    assets.open("hrtf/$name").use { input ->
+                        File(hrtfDir, name).outputStream().use { output -> input.copyTo(output) }
+                    }
                 }
-                val end = minOf(fed + chunk, bytes.size)
-                lastPushed = nativeFeed(ptr, bytes.copyOfRange(fed, end))
-                fed = end
+                ptr = nativeInit(
+                    """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}""",
+                    File(hrtfDir, "hrtf-set.json").absolutePath
+                )
+                check(ptr != 0L) { "引擎初始化失败" }
+                check(nativeStart(ptr) == 0) { "音频输出启动失败" }
+                check(nativeSetVolume(ptr, if (muted) 0f else 0.25f) == 0) { "音量设置失败" }
+                val maxLead = 2L * 48000L
+                var lastUpdate = 0L
+                var lastProgress = System.nanoTime()
+                var lastConsumed = 0L
+                assets.open("song.eac3").use { input ->
+                    val buffer = ByteArray(4096)
+                    while (!stopRequested) {
+                        val state = JSONObject(nativeStatus(ptr))
+                        // Missing status fields are an incompatible native library, not zero progress.
+                        val decoded = state.getLong("decodedSamplePos")
+                        val consumed = state.getLong("consumedSamplePos")
+                        val now = System.nanoTime()
+                        if (consumed != lastConsumed) {
+                            lastProgress = now
+                            lastConsumed = consumed
+                        }
+                        check(decoded == 0L || now - lastProgress < 15_000_000_000L) {
+                            "播放进度停止，请查看音频日志"
+                        }
+                        if (now - lastUpdate > 1_000_000_000L) {
+                            Log.i("SdaEngine", "playback_status=$state muted=$muted")
+                            val seconds = consumed / 48000L
+                            runOnUiThread {
+                                status.text = "${if (muted) "静音验证" else "正在播放"}：${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')} / 3:31\n音频输出：PCM_FLOAT，48 kHz 双声道"
+                            }
+                            lastUpdate = now
+                        }
+                        if (decoded - consumed > maxLead) {
+                            Thread.sleep(20)
+                            continue
+                        }
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        check(nativeFeed(ptr, if (count == buffer.size) buffer else buffer.copyOf(count)) >= 0) {
+                            "音频数据提交失败"
+                        }
+                    }
+                }
+                if (!stopRequested) {
+                    check(nativeFinish(ptr) >= 0) { "音频尾帧提交失败" }
+                    val deadline = System.nanoTime() + 15_000_000_000L
+                    while (!stopRequested) {
+                        val state = JSONObject(nativeStatus(ptr))
+                        if (state.getLong("consumedSamplePos") >= state.getLong("decodedSamplePos")) {
+                            Log.i("SdaEngine", "playback_complete=$state muted=$muted")
+                            resultText = "播放完成，可重新播放。"
+                            break
+                        }
+                        check(System.nanoTime() < deadline) { "等待播放结束超时" }
+                        Thread.sleep(20)
+                    }
+                }
+            } catch (error: Exception) {
+                Log.e("SdaEngine", "playback failed", error)
+                resultText = "播放失败：${error.message}"
+            } finally {
+                // All JNI handle access stays on this thread, including close.
+                if (ptr != 0L) nativeClose(ptr)
                 runOnUiThread {
-                    val seconds = decoded * 1000L / 48000L / 1000L
-                    tv.text = "playing song.eac3, at ~${seconds}s / 211s (frames $lastPushed)"
+                    status.text = resultText
+                    worker = null
+                    play.isEnabled = true
+                    stop.isEnabled = false
                 }
             }
-            runOnUiThread { tv.text = "playback complete (song.eac3)" }
-        }.start()
+        }, "sda-song-feed").also { it.start() }
+    }
+
+    override fun onStop() {
+        stopRequested = true
+        super.onStop()
     }
 }
