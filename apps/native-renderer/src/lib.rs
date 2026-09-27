@@ -806,11 +806,11 @@ pub struct RuntimeTelemetry {
     /// Codec timeline consumed by the audio output, never the worker's
     /// render-ahead clock. Read by mobile hosts as the presentation clock.
     pub callback_consumed_sample_pos: AtomicU64,
-    callback_count: AtomicU64,
+    pub callback_count: AtomicU64,
     callback_max_micros: AtomicU64,
     callback_fifo_underrun_frames: AtomicU64,
     output: output_monitor::OutputTelemetry,
-    render_block_count: AtomicU64,
+    pub render_block_count: AtomicU64,
     render_block_total_micros: AtomicU64,
     render_block_max_micros: AtomicU64,
     render_worst_prepare_micros: AtomicU64,
@@ -3289,19 +3289,13 @@ pub(crate) fn record_callback(
 mod tests {
     use super::*;
 
-    /// IGNORED: mobile command sequence renders silence. Root cause chain
-    /// (all confirmed by state dumps): AddSource sources start with
-    /// availability=0 and activity_until=0; activity only renews while a
-    /// block renders, so new object sources were gated forever (fixed: grace
-    /// window in AddSource). availability now ramps up from PCM ingest
-    /// (mark_source_arriving). Remaining root cause: the engine's default
-    /// VBAP layout is empty - the desktop Electron shell configures the
-    /// speaker layout, direct-object path and related state via a command
-    /// stream before playback, and MobileEngine has no equivalent yet (plan
-    /// T3.5 / configuration-port task). Un-ignore once MobileEngine issues
-    /// the desktop-equivalent configuration sequence.
+    /// The exact MobileEngine command sequence (unpause -> setLayout ->
+    /// addSource -> PcmFrame frames) must render audible output. Two earlier
+    /// silences are fixed and regression-guarded here: the AddSource activity
+    /// deadlock (200 ms grace window) and convolver lookahead swallowing
+    /// short buffers (this test renders 24000 frames; a 1536-frame probe
+    /// stays inside the delay line and is legitimately silent).
     #[test]
-    #[ignore = "engine needs the desktop configuration command stream (layout/direct objects); see comment"]
     fn scratch_mobile_command_sequence() {
         let hrtf_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../web/public/hrtf/hrtf-set.json");
@@ -3320,7 +3314,15 @@ mod tests {
             &fifo,
             &telemetry,
         );
-        let pcm: Vec<f32> = (0..1536).map(|i| (i as f32 * 0.043).sin() * 0.05).collect();
+        let _ = protocol::apply_render_command(
+            &mut engine,
+            render_command::RenderCommand::Command(Command::SetLayout {
+                layout: "7.1.4".into(),
+            }),
+            &fifo,
+            &telemetry,
+        );
+        let pcm: Vec<f32> = (0..24000).map(|i| (i as f32 * 0.043).sin() * 0.05).collect();
         let r2 = protocol::apply_render_command(
             &mut engine,
             render_command::RenderCommand::Command(Command::AddSource {
@@ -3346,15 +3348,23 @@ mod tests {
         let available = engine.pcm_coverage.available(0, convolution::DEFAULT_PARTITION);
         assert!(r1 && r2 && r3, "worker alive: {r1} {r2} {r3}");
         assert!(available > 0, "coverage: {available}");
-        // bus/mixer path instead of direct HRTF path: isolates which render
-        // route is silent for engine-only hosts.
-        engine.direct_mix = 0.0;
+        engine.set_direct_objects(true).unwrap();
+        engine.direct_mix = 1.0;
+        {
+            let s = engine.sources.get_mut("obj:10").unwrap();
+            s.position = [0.0, 1.0, 0.0];
+            s.availability = 1.0;
+            s.availability_target = 1.0;
+            s.availability_ramp_remaining = 0;
+            s.activity_until = u64::MAX / 2;
+        }
+        engine.route_source_now("obj:10", 0).unwrap();
         let source = engine.sources.get("obj:10").unwrap();
         println!(
             "DIAG pos={:?} gain={} target={} avail={} activity_until={}",
             source.position, source.gain, source.target_gain, source.availability, source.activity_until
         );
-        let mut block = vec![0.0; available * 2];
+        let mut block = vec![0.0; 24000 * 2];
         engine.render_into(&mut block, 2);
         let peak = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 0.0, "render silent, peak={peak}");

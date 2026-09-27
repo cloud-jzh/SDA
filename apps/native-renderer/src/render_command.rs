@@ -111,6 +111,11 @@ impl RenderCommandQueue {
         }
     }
 
+    /// Debug access for hosts outside the crate (mobile facade tests).
+    pub fn pending_len_for_debug(&self) -> usize {
+        self.pending.lock().expect("render command queue poisoned").len()
+    }
+
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.pending

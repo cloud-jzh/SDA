@@ -832,11 +832,39 @@ pub(super) fn apply_render_command(
                         })
                 });
             if !valid {
+                let reason = if events.len() > 4096 {
+                    "events>4096"
+                } else if let Some(event) = events.iter().find(|event| !event.zone_exclusion.iter().all(|zone| zone.valid())) {
+                    "invalid zone"
+                } else if entries.is_empty() {
+                    "empty entries"
+                } else if entries.len() > MAX_SOURCES {
+                    "too many entries"
+                } else if samples == 0 {
+                    "zero samples"
+                } else {
+                    let mut reason = String::from("ring/can_write");
+                    for (id, pcm) in &entries {
+                        if pcm.len() != samples {
+                            reason = format!("len mismatch {id}");
+                            break;
+                        }
+                        if pcm.iter().any(|v| !v.is_finite()) {
+                            reason = format!("non-finite {id}");
+                            break;
+                        }
+                        if state.sources.get(id).is_none() {
+                            reason = format!("unknown source {id}");
+                            break;
+                        }
+                    }
+                    reason.as_str()
+                };
                 write_event(&Event::BatchAck {
                     start,
                     samples: samples as u32,
                     accepted: false,
-                    detail: Some("invalid metadata/PCM transaction or source ring capacity"),
+                    detail: Some(&reason),
                 });
             } else {
                 // Do not reapply metadata when acknowledging a completed replay.

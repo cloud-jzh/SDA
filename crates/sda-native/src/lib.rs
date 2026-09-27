@@ -44,11 +44,19 @@ pub use sda_native_renderer::hrtf::NativeHrtfSet as NativeHrtfSetFacade;
 pub struct EngineConfig {
     pub sample_rate: u32,
     pub output_channels: u16,
+    /// Speaker layout id fed to the VBAP solver (desktop default "7.1.4").
+    /// Omitted in JSON -> engine default.
+    #[serde(default = "default_layout")]
+    pub layout: String,
+}
+
+fn default_layout() -> String {
+    "7.1.4".to_string()
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { sample_rate: 48000, output_channels: 2 }
+        Self { sample_rate: 48000, output_channels: 2, layout: default_layout() }
     }
 }
 
@@ -169,6 +177,12 @@ impl MobileEngine {
         // worker owns (mirrors the desktop Play flow).
         let _ = commands
             .push(render_command::RenderCommand::Command(Command::Pause { paused: false }));
+        // Desktop-equivalent configuration stream: the Electron shell always
+        // selects a speaker layout before playback; without it the VBAP
+        // solver is empty and every route is silent.
+        let _ = commands.push(render_command::RenderCommand::Command(
+            Command::SetLayout { layout: self.config.layout.clone() },
+        ));
         self.pipeline = Some(RenderPipeline { fifo, commands, telemetry });
         self.drain_pending_into_pipeline();
         Ok(())
@@ -420,7 +434,7 @@ mod tests {
     #[test]
     fn rejects_non_stereo_output() {
         let error = match MobileEngine::new(
-            EngineConfig { sample_rate: 48000, output_channels: 6 },
+            EngineConfig { sample_rate: 48000, output_channels: 6, layout: "7.1.4".into() },
             None,
         ) {
             Err(error) => error,
@@ -432,19 +446,16 @@ mod tests {
     /// T1.8: the presentation clock and watermark come from the render
     /// pipeline's consumption telemetry, fed by a WAV dump output.
     ///
-    /// IGNORED (engine-only output handshake, open for T2.2): with the render
-    /// worker running, the FIFO never receives rendered frames — telemetry
-    /// stays fifo=0/consumed=0 even with HRTF loaded, output_active=true and
-    /// an unpause command delivered. The synchronous path renders fine
-    /// (PcmFrame populates coverage; render_into runs). Suspect the worker's
-    /// flush-epoch wait (`stereo_fifo::flush_acknowledged` after the pause
-    /// epoch bump) or another gate only the desktop CPAL callback satisfies.
-    /// The on-device AAudio sink (T2.2) must mirror the CPAL callback
-    /// contract exactly (apply_flush_from_consumer at entry, consumption
-    /// reporting); debug there with logcat, or reproduce with a debug event
-    /// sink capturing worker ACKs.
+    /// T1.8: the presentation clock and watermark come from the render
+    /// pipeline consumption telemetry, fed by a WAV dump output.
+    /// Still failing after the activity/availability/layout fixes: every
+    /// PcmFrame is rejected by the worker-side validation (batchAck
+    /// accepted:false) while the same fixture passes sda-core decode tests
+    /// with zero non-finite samples. Diagnostic batchAck detail added in
+    /// protocol.rs to identify the failing clause; next session continues
+    /// from the reported detail string.
     #[test]
-    #[ignore = "worker/FIFO handshake for engine-only outputs unresolved; see comment"]
+    #[ignore = "PcmFrame rejection root cause not yet identified; see comment"]
     fn playback_status_tracks_consumed_clock() {
         let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
         let hrtf = concat!(
@@ -479,9 +490,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let status = engine.playback_status();
+        let pipeline = engine.pipeline.as_ref().unwrap();
         panic!(
-            "consumed clock never advanced: fifo={} pending={} consumed={}",
-            status.fifo_frames, status.pending_batches, status.consumed_sample_pos
+            "consumed clock never advanced: fifo={} pending={} consumed={} blocks={} callbacks={} cmdq_len={}",
+            status.fifo_frames,
+            status.pending_batches,
+            status.consumed_sample_pos,
+            pipeline.telemetry.render_block_count.load(std::sync::atomic::Ordering::Relaxed),
+            pipeline.telemetry.callback_count.load(std::sync::atomic::Ordering::Relaxed),
+            pipeline.commands.pending_len_for_debug(),
         );
     }
 
