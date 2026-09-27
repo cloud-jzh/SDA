@@ -81,6 +81,10 @@ pub struct DecodeStatus {
 pub struct PlaybackStatus {
     /// Codec clock consumed by the audio output (samples @ config.sample_rate).
     pub consumed_sample_pos: u64,
+    /// Codec clock of the newest decoded frame: hosts pace feeding so this
+    /// stays a bounded amount ahead of consumed_sample_pos (clock-drift-free
+    /// backpressure).
+    pub decoded_sample_pos: u64,
     pub position_ms: u64,
     /// Rendered stereo frames buffered in the engine FIFO awaiting output.
     pub fifo_frames: usize,
@@ -259,6 +263,7 @@ impl MobileEngine {
         };
         PlaybackStatus {
             consumed_sample_pos: consumed,
+            decoded_sample_pos: self.decoded_sample_pos(),
             position_ms: consumed * 1000 / u64::from(self.config.sample_rate),
             fifo_frames,
             pending_batches: pending_len,

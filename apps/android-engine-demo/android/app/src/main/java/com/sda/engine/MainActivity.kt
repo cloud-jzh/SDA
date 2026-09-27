@@ -50,24 +50,32 @@ class MainActivity : Activity() {
             return
         }
 
-        // Feed the song paced to roughly real time: the render pipeline keeps
-        // only a small FIFO (341 ms target) and the command queue caps PCM at
-        // 16 MB, so un-paced feeding of a long file would silently drop
-        // chunks. 24 KB at 448 kb/s is ~0.43 s of audio per chunk.
+        // Feed with clock-drift-free backpressure: keep the decoded codec
+        // clock at most ~2 s ahead of the consumption clock reported by the
+        // engine. Fixed-sleep pacing drifts against the audio device clock
+        // and corrupts the ring over a long file.
         Thread {
             val bytes = stream.readBytes()
             val chunk = 24 * 1024
+            val maxLead = 2L * 48000L
             var fed = 0
             var lastPushed = 0
             while (fed < bytes.size) {
+                val rawStatus = nativeStatus(ptr)
+                if (fed == 0) android.util.Log.i("SdaEngine", "status=$rawStatus")
+                val obj = org.json.JSONObject(rawStatus)
+                val decoded = obj.optLong("decodedSamplePos")
+                val consumed = obj.optLong("consumedSamplePos")
+                if (decoded - consumed > maxLead) {
+                    Thread.sleep(20)
+                    continue
+                }
                 val end = minOf(fed + chunk, bytes.size)
                 lastPushed = nativeFeed(ptr, bytes.copyOfRange(fed, end))
                 fed = end
-                // Pacing: chunk holds ~0.43 s of encoded audio.
-                Thread.sleep(430)
                 runOnUiThread {
-                    val seconds = fed * 8L / 448000L
-                    tv.text = "playing song.eac3, fed ${seconds}s / ${bytes.size * 8L / 448000L}s (frames $lastPushed)"
+                    val seconds = decoded * 1000L / 48000L / 1000L
+                    tv.text = "playing song.eac3, at ~${seconds}s / 211s (frames $lastPushed)"
                 }
             }
             runOnUiThread { tv.text = "playback complete (song.eac3)" }
