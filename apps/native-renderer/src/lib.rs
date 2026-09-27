@@ -353,6 +353,30 @@ impl AudioOutput for WavDumpOutput {
     }
 }
 
+/// Minimal 16-bit PCM WAV encoder for arbitrary channel counts.
+pub fn encode_wav_i16_multichannel(interleaved: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
+    let data_len = (interleaved.len() * 2) as u32;
+    let block_align = channels * 2;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16_u32.to_le_bytes());
+    out.extend_from_slice(&1_u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * u32::from(block_align)).to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&16_u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for sample in interleaved {
+        let clamped = sample.clamp(-1.0, 1.0);
+        out.extend_from_slice(&((clamped * 32767.0) as i16).to_le_bytes());
+    }
+    out
+}
+
 /// Minimal 16-bit PCM WAV encoder (RIFF header + interleaved stereo).
 pub fn encode_wav_i16(interleaved: &[f32], sample_rate: u32) -> std::io::Result<Vec<u8>> {
     let data_len = (interleaved.len() * 2) as u32;
