@@ -420,6 +420,108 @@ pub mod jni;
 mod tests {
     use super::*;
 
+    /// Decode-only dump of song.eac3 (no render pipeline): writes the raw
+    /// decoder output (all bed channels, 6ch WAV) so decode correctness can
+    /// be judged by ear on the PC, isolated from the render path.
+    #[test]
+    fn dump_song_decode_only() {
+        let song = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/android-engine-demo/android/app/src/main/assets/song.eac3"
+        );
+        let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        let bytes = std::fs::read(song).unwrap();
+        engine.feed(&bytes).unwrap();
+        let frames = engine.take_pending_frames();
+        assert!(!frames.is_empty(), "song.eac3 must decode");
+        let max_frames = 2000.min(frames.len());
+        let channels = frames[0].channels.len();
+        let mut inter = Vec::new();
+        for frame in &frames[..max_frames] {
+            let len = frame.channels[0].len();
+            for i in 0..len {
+                for channel in frame.channels.iter().take(channels) {
+                    inter.push(channel[i]);
+                }
+            }
+        }
+        let out = std::env::temp_dir().join("song-decode-dump.wav");
+        let bytes_out = sda_native_renderer::encode_wav_i16_multichannel(&inter, 48000, channels as u16);
+        std::fs::write(&out, bytes_out).unwrap();
+        let mut peaks = vec![0.0_f32; channels];
+        for frame in &frames[..max_frames] {
+            for (ch, channel) in frame.channels.iter().enumerate() {
+                for v in channel {
+                    peaks[ch] = peaks[ch].max(v.abs());
+                }
+            }
+        }
+        println!(
+            "DECODE_DUMP frames={} channels={} out={:?} peaks={:?}",
+            max_frames, channels, out, peaks
+        );
+    }
+
+    /// Full pipeline render of song.eac3 on host (decode -> render -> FIFO ->
+    /// WavDump) with paced feeding. Compare with dump_song_decode_only to
+    /// isolate decode vs render distortion.
+    #[test]
+    fn dump_song_render() {
+        let song = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/android-engine-demo/android/app/src/main/assets/song.eac3"
+        );
+        let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        let hrtf = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/web/public/hrtf/hrtf-set.json"
+        );
+        engine.load_hrtf(hrtf).unwrap();
+        let dump = std::env::temp_dir().join("song-render-dump.wav");
+        let _ = std::fs::remove_file(&dump);
+        engine
+            .start(Arc::new(sda_native_renderer::WavDumpOutput::new(&dump, 48000)))
+            .unwrap();
+        let bytes = std::fs::read(song).unwrap();
+        let chunk = 24 * 1024;
+        let mut fed = 0;
+        while fed < bytes.len() {
+            let end = (fed + chunk).min(bytes.len());
+            engine.feed(&bytes[fed..end]).unwrap();
+            fed = end;
+            while engine.playback_status().fifo_frames > 12000 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline && !dump.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(dump.exists(), "render dump never written");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let wav = std::fs::read(&dump).expect("dump readable");
+        let frames = (wav.len() - 44) / 4;
+        let mut envelope = Vec::new();
+        for chunk in wav[44..].chunks(4800 * 2) {
+            let rms = (chunk
+                .chunks_exact(2)
+                .map(|s| {
+                    let v = i16::from_le_bytes([s[0], s[1]]) as f64 / 32768.0;
+                    v * v
+                })
+                .sum::<f64>()
+                / (chunk.len() / 2).max(1) as f64)
+                .sqrt();
+            envelope.push((rms * 1000.0).round() / 1000.0);
+        }
+        println!(
+            "RENDER_DUMP frames={frames} (~{} ms) envelope(100ms)={:?}",
+            frames * 1000 / 48000,
+            envelope
+        );
+        assert!(frames > 48000, "expected over 1 s of rendered audio");
+    }
+
     /// Dumps the full engine render of the JOC fixture through WavDumpOutput
     /// so the audible content can be inspected offline (duration, envelope).
     #[test]
