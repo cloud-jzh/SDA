@@ -346,7 +346,7 @@ impl MobileEngine {
             let entries: Vec<(String, Vec<f32>)> = frame
                 .labels
                 .iter()
-                .cloned()
+                .map(|label| source_id(label))
                 .zip(frame.channels.iter().cloned())
                 .collect();
             let events: Vec<NativeObjectEvent> = frame

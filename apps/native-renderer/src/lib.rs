@@ -3359,11 +3359,7 @@ mod tests {
             s.activity_until = u64::MAX / 2;
         }
         engine.route_source_now("obj:10", 0).unwrap();
-        let source = engine.sources.get("obj:10").unwrap();
-        println!(
-            "DIAG pos={:?} gain={} target={} avail={} activity_until={}",
-            source.position, source.gain, source.target_gain, source.availability, source.activity_until
-        );
+
         let mut block = vec![0.0; 24000 * 2];
         engine.render_into(&mut block, 2);
         let peak = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
