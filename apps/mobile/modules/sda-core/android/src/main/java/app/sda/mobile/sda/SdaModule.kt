@@ -49,7 +49,7 @@ class SdaModule : Module() {
       // Loop-feed the clip; the engine FIFO absorbs it and the AAudio writer
       // drains at device pace.
       stopped = false
-      feedThread = Thread {
+      val worker = Thread {
         val bytes = stream.readBytes()
         val chunk = 24 * 1024
         while (!stopped) {
@@ -62,7 +62,9 @@ class SdaModule : Module() {
           }
           try { Thread.sleep(1200) } catch (_: InterruptedException) { return@Thread }
         }
-      }.apply { name = "sda-js-feed" }.start()
+      }
+      worker.name = "sda-js-feed"
+      worker.start()
     }
 
     Function("status") { ->
