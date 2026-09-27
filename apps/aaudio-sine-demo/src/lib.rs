@@ -46,12 +46,17 @@ extern "C" {
     );
     fn AAudioStreamBuilder_openStream(builder: AAudioStreamBuilder, stream: *mut AAudioStream) -> i32;
     fn AAudioStreamBuilder_delete(builder: AAudioStreamBuilder);
+    fn AAudioStream_getFormat(stream: AAudioStream) -> i32;
     fn AAudioStream_requestStart(stream: AAudioStream) -> i32;
     fn AAudioStream_getFramesPerBurst(stream: AAudioStream) -> i32;
     fn AAudioStream_close(stream: AAudioStream) -> i32;
 }
 
 static SINE_PHASE: AtomicI64 = AtomicI64::new(0);
+/// Format actually granted at open time. Writing the wrong sample size into
+/// the callback buffer overflows it (SIGSEGV) — MuMu's shared-mix path hands
+/// out PCM 16-bit even when PCM float was requested.
+static ACTUAL_FORMAT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(AAUDIO_FORMAT_PCM_FLOAT);
 static mut STREAM: AAudioStream = core::ptr::null_mut();
 static CALLBACK: AAudioStreamCallback = AAudioStreamCallback {
     on_audio_ready: Some(on_audio_ready),
@@ -68,14 +73,27 @@ extern "C" fn on_audio_ready(
 ) -> i32 {
     const PHASE_STEP: i64 = ((440.0 / SAMPLE_RATE as f64) * (1i64 << 32) as f64) as i64;
     let frames = num_frames.max(0) as usize;
-    let out = unsafe { core::slice::from_raw_parts_mut(audio_data as *mut f32, frames * 2) };
     let mut phase = SINE_PHASE.load(Ordering::Relaxed);
-    for frame in out.chunks_exact_mut(2) {
-        let angle = (phase as f64) / (1i64 << 32) as f64 * core::f64::consts::TAU;
-        let sample = (angle.sin() * 0.2) as f32;
-        frame[0] = sample;
-        frame[1] = sample;
-        phase = phase.wrapping_add(PHASE_STEP);
+    let format = ACTUAL_FORMAT.load(Ordering::Relaxed);
+    if format == AAUDIO_FORMAT_PCM_FLOAT {
+        let out = unsafe { core::slice::from_raw_parts_mut(audio_data as *mut f32, frames * 2) };
+        for frame in out.chunks_exact_mut(2) {
+            let angle = (phase as f64) / (1i64 << 32) as f64 * core::f64::consts::TAU;
+            let sample = (angle.sin() * 0.2) as f32;
+            frame[0] = sample;
+            frame[1] = sample;
+            phase = phase.wrapping_add(PHASE_STEP);
+        }
+    } else {
+        // PCM 16-bit
+        let out = unsafe { core::slice::from_raw_parts_mut(audio_data as *mut i16, frames * 2) };
+        for frame in out.chunks_exact_mut(2) {
+            let angle = (phase as f64) / (1i64 << 32) as f64 * core::f64::consts::TAU;
+            let sample = ((angle.sin() * 0.2) * 32767.0) as i16;
+            frame[0] = sample;
+            frame[1] = sample;
+            phase = phase.wrapping_add(PHASE_STEP);
+        }
     }
     SINE_PHASE.store(phase, Ordering::Relaxed);
     AAUDIO_OK
@@ -140,8 +158,12 @@ pub extern "system" fn Java_com_sda_sine_MainActivity_startSine(
                 return -2;
             }
         }
+        let actual = AAudioStream_getFormat(stream);
+        ACTUAL_FORMAT.store(actual, Ordering::Relaxed);
         let burst = AAudioStream_getFramesPerBurst(stream);
-        android_log(&format!("sine stream opened, framesPerBurst={burst}"));
+        android_log(&format!(
+            "sine stream opened, framesPerBurst={burst}, format={actual} (1=float 2=int16)"
+        ));
         let result = AAudioStream_requestStart(stream);
         AAudioStreamBuilder_delete(builder);
         if result != AAUDIO_OK {
