@@ -477,6 +477,14 @@ mod tests {
         assert_eq!(first.sample_rate, 48000);
         assert!(!first.channels.is_empty());
         assert!(first.channels.iter().all(|c| !c.is_empty()));
+        let mut non_finite = 0_usize;
+        for frame in &frames {
+            for channel in &frame.channels {
+                non_finite += channel.iter().filter(|v| !v.is_finite()).count();
+            }
+        }
+        println!("NON_FINITE_SAMPLES={non_finite} total_frames={}", frames.len());
+        assert_eq!(non_finite, 0, "decoder output must be finite");
         assert!(
             first.labels.iter().any(|l| l.starts_with("Obj_")),
             "JOC fixture should carry object labels, got {:?}",

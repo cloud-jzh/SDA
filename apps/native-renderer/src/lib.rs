@@ -335,7 +335,7 @@ impl AudioOutput for WavDumpOutput {
                 // Exit after rendered+drained audio settled, or after a hard
                 // idle ceiling so hosts/tests cannot leak this thread when
                 // nothing ever renders.
-                if (interleaved.len() >= 48 && idle_polls >= 60) || idle_polls >= 600 {
+                if (interleaved.len() >= 48 && idle_polls >= 60) || idle_polls >= 3000 {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -3195,6 +3195,20 @@ pub fn spawn_render_worker(
                     || engine.paused
                     || frames == 0
                 {
+                    static DIAG_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let tick = DIAG_TICK.fetch_add(1, Ordering::Relaxed);
+                    if tick % 200 == 0 {
+                        eprintln!(
+                            "gate blocked: read={} write={} active={} paused={} frames={frames} sample_pos={} coverage_total={} cmdq={}",
+                            fifo.available_read(),
+                            fifo.available_write(),
+                            engine.output_active,
+                            engine.paused,
+                            engine.sample_pos,
+                            engine.pcm_coverage.available(0, 48000),
+                            commands.pending_len_for_debug(),
+                        );
+                    }
                     // A 500 us idle sleep let a burst of control commands keep
                     // re-waking the loop without crossing the render gate, so
                     // the FIFO drained by hundreds of ms before rendering
