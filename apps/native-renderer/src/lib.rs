@@ -905,7 +905,9 @@ pub struct Engine {
     directional_hrtf_requested: bool,
     directional_hrtf: bool,
     program_codec: Option<String>,
-    direct_mix: f32,
+    /// Object direct-path loudness mix (desktop JS sets this via command;
+    /// mobile hosts flip it at engine start).
+    pub direct_mix: f32,
     lfe_path: LfePath,
     hardware_lfe: hardware::Chain,
     hardware_stereo: [hardware::Chain; 2],
@@ -1085,7 +1087,7 @@ impl Engine {
             .unwrap_or_else(|| std::path::PathBuf::from("hrtf-assets"))
     }
 
-    fn set_direct_objects(&mut self, enabled: bool) -> Result<(), String> {
+    pub fn set_direct_objects(&mut self, enabled: bool) -> Result<(), String> {
         if enabled && !self.cinema.monitor.hardware.enabled {
             let set = self
                 .active_hrtf_set
@@ -3286,6 +3288,73 @@ pub(crate) fn record_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// IGNORED: mobile command sequence renders silence - the source lands
+    /// with availability=0 (desktop drives it via a command chain the mobile
+    /// path lacks) and the availability de-pop ramp advances somewhere in the
+    /// render loop not yet located. ingest-time ramp start (protocol.rs
+    /// mark_source_arriving) is in place; target reaches 1 but availability
+    /// itself stays 0 at render time. Next step: find where
+    /// availability_ramp_remaining is decremented and why it does not run for
+    /// direct-object sources here, then un-ignore.
+    #[test]
+    #[ignore = "availability ramp not advancing for direct objects; see comment"]
+    fn scratch_mobile_command_sequence() {
+        let hrtf_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../web/public/hrtf/hrtf-set.json");
+        let mut engine = Engine::new(48000, 2);
+        engine
+            .replace_hrtf(crate::hrtf::NativeHrtfSet::load_calibrated(&hrtf_path).unwrap(), 0.0)
+            .unwrap();
+        engine.set_output_active(true);
+        let fifo = Arc::new(stereo_fifo::StereoFifo::new(STEREO_FIFO_CAPACITY_FRAMES));
+        let telemetry = Arc::new(RuntimeTelemetry::default());
+
+        // Exact MobileEngine sequence: unpause, declare source, push frames.
+        let r1 = protocol::apply_render_command(
+            &mut engine,
+            render_command::RenderCommand::Command(Command::Pause { paused: false }),
+            &fifo,
+            &telemetry,
+        );
+        let pcm: Vec<f32> = (0..1536).map(|i| (i as f32 * 0.043).sin() * 0.05).collect();
+        let r2 = protocol::apply_render_command(
+            &mut engine,
+            render_command::RenderCommand::Command(Command::AddSource {
+                id: "obj:10".into(),
+                at: None,
+                bed_label: None,
+            }),
+            &fifo,
+            &telemetry,
+        );
+        let r3 = protocol::apply_render_command(
+            &mut engine,
+            render_command::RenderCommand::PcmFrame {
+                start: 0,
+                entries: vec![("obj:10".into(), pcm)],
+                events: vec![NativeObjectEvent::from_decoder_contract(
+                    10, 0, true, [0.0, 1.0, 0.0], 0.0, [0.0; 3], None, false, 128,
+                )],
+            },
+            &fifo,
+            &telemetry,
+        );
+        let available = engine.pcm_coverage.available(0, convolution::DEFAULT_PARTITION);
+        assert!(r1 && r2 && r3, "worker alive: {r1} {r2} {r3}");
+        assert!(available > 0, "coverage: {available}");
+        engine.set_direct_objects(true).unwrap();
+        engine.direct_mix = 1.0;
+        let source = engine.sources.get("obj:10").unwrap();
+        println!(
+            "DIAG pos={:?} gain={} target={} avail={} activity_until={}",
+            source.position, source.gain, source.target_gain, source.availability, source.activity_until
+        );
+        let mut block = vec![0.0; available * 2];
+        engine.render_into(&mut block, 2);
+        let peak = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.0, "render silent, peak={peak}");
+    }
 
     /// T1.7 acceptance: the render worker drains engine PCM through the FIFO
     /// into an AudioOutput implementation (WAV dump) without any platform

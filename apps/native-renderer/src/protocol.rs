@@ -1013,6 +1013,9 @@ fn ingest_pcm_batch(state: &mut Engine, start: u64, entries: Vec<(String, Vec<f3
         start.max(state.sample_pos),
         start.saturating_add(samples as u64),
     );
+    for (id, _) in &entries {
+        mark_source_arriving(state, id);
+    }
     for (id, pcm) in entries {
         crate::performance::ingress(&id, start.max(state.sample_pos));
         crate::performance::sample(
@@ -1034,6 +1037,21 @@ fn ingest_pcm_batch(state: &mut Engine, start: u64, entries: Vec<(String, Vec<f3
         accepted: true,
         detail: None,
     });
+}
+
+/// PCM arrival means the host is feeding this source audibly: raise its
+/// availability through the de-pop ramp. The desktop flow drives this from
+/// the player's feed loop; engine-only hosts (mobile) rely on ingest itself.
+fn mark_source_arriving(state: &mut Engine, id: &str) {
+    if let Some(source) = state.sources.get_mut(id) {
+        if source.availability_target < 1.0 {
+            source.availability_target = 1.0;
+            if source.availability_ramp_remaining == 0 {
+                source.availability_ramp_remaining = 32;
+                source.availability_step = (1.0 - source.availability) / 32.0;
+            }
+        }
+    }
 }
 
 fn ingest_pcm(state: &mut Engine, id: &str, start: u64, samples: Vec<f32>) {
@@ -1063,6 +1081,7 @@ fn ingest_pcm(state: &mut Engine, id: &str, start: u64, samples: Vec<f32>) {
         start.max(state.sample_pos),
         start.saturating_add(samples.len() as u64),
     );
+    mark_source_arriving(state, id);
     write_event(&Event::Ack {
         command: "feed",
         accepted: true,
