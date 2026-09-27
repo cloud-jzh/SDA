@@ -3289,16 +3289,19 @@ pub(crate) fn record_callback(
 mod tests {
     use super::*;
 
-    /// IGNORED: mobile command sequence renders silence - the source lands
-    /// with availability=0 (desktop drives it via a command chain the mobile
-    /// path lacks) and the availability de-pop ramp advances somewhere in the
-    /// render loop not yet located. ingest-time ramp start (protocol.rs
-    /// mark_source_arriving) is in place; target reaches 1 but availability
-    /// itself stays 0 at render time. Next step: find where
-    /// availability_ramp_remaining is decremented and why it does not run for
-    /// direct-object sources here, then un-ignore.
+    /// IGNORED: mobile command sequence renders silence. Root cause chain
+    /// (all confirmed by state dumps): AddSource sources start with
+    /// availability=0 and activity_until=0; activity only renews while a
+    /// block renders, so new object sources were gated forever (fixed: grace
+    /// window in AddSource). availability now ramps up from PCM ingest
+    /// (mark_source_arriving). Remaining root cause: the engine's default
+    /// VBAP layout is empty - the desktop Electron shell configures the
+    /// speaker layout, direct-object path and related state via a command
+    /// stream before playback, and MobileEngine has no equivalent yet (plan
+    /// T3.5 / configuration-port task). Un-ignore once MobileEngine issues
+    /// the desktop-equivalent configuration sequence.
     #[test]
-    #[ignore = "availability ramp not advancing for direct objects; see comment"]
+    #[ignore = "engine needs the desktop configuration command stream (layout/direct objects); see comment"]
     fn scratch_mobile_command_sequence() {
         let hrtf_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../web/public/hrtf/hrtf-set.json");
@@ -3343,8 +3346,9 @@ mod tests {
         let available = engine.pcm_coverage.available(0, convolution::DEFAULT_PARTITION);
         assert!(r1 && r2 && r3, "worker alive: {r1} {r2} {r3}");
         assert!(available > 0, "coverage: {available}");
-        engine.set_direct_objects(true).unwrap();
-        engine.direct_mix = 1.0;
+        // bus/mixer path instead of direct HRTF path: isolates which render
+        // route is silent for engine-only hosts.
+        engine.direct_mix = 0.0;
         let source = engine.sources.get("obj:10").unwrap();
         println!(
             "DIAG pos={:?} gain={} target={} avail={} activity_until={}",

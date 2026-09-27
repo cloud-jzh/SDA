@@ -149,7 +149,12 @@ fn handle_command(
                 source.object_id = object_id;
                 source.bed_label =
                     (!is_object).then(|| bed_label.unwrap_or_else(|| "Bed_0".into()));
-                source.activity_until = 0;
+                // Grace window: a brand-new source must survive the render
+                // gate until its first PCM block proves activity, otherwise
+                // object sources start muted forever (activity only renews
+                // while a block actually renders).
+                source.activity_until = sample_pos
+                    + (state.output_sample_rate as f64 * 0.2).round() as u64;
                 if is_object {
                     for event in pending {
                         apply_object_event(source, sample_pos, event);
