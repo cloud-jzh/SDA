@@ -25,6 +25,13 @@
 
 IDE build 工具未连接 SDA 项目（只打开了另两个项目），未用于验证；实际 Rust/NDK/Gradle 编译均通过。
 
+## 用户最终试听确认
+
+设备重启后重新安装并打开修复版，用户随后明确反馈“可以了！！！”。因此，用户提供歌曲转为立体声 E-AC-3 后经 SDA 渲染、在 MuMu 播放的听感用例已通过。此确认不补充未采集到的 MuMu 整曲结束日志，也不扩大为 MP3 直接解码、Atmos 对象音频或真机验收。
+
+已将可复用诊断步骤及历史误判整理为项目级 skill：
+[`.agents/skills/sda-android-audio-debugging/SKILL.md`](../.agents/skills/sda-android-audio-debugging/SKILL.md)。
+
 ## 试听行为
 
 正常打开 SDA Engine 不自动出声。点击“播放歌曲（低音量）”开始，默认应用音量 25%；有停止按钮，离开页面请求停止，由单一 JNI 调用线程释放引擎，worker/writer 收到停止标志退出。测试专用 intent `validationMuted=true` 才会静音自动跑通路。
