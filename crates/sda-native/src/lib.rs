@@ -172,7 +172,6 @@ impl MobileEngine {
             fifo.clone(),
             telemetry.clone(),
         );
-        output.clone().run(fifo.clone(), telemetry.clone(), commands.clone());
         // Engine::new starts paused; unpause through the command path the
         // worker owns (mirrors the desktop Play flow).
         let _ = commands
@@ -183,8 +182,16 @@ impl MobileEngine {
         let _ = commands.push(render_command::RenderCommand::Command(
             Command::SetLayout { layout: self.config.layout.clone() },
         ));
-        self.pipeline = Some(RenderPipeline { fifo, commands, telemetry });
+        self.pipeline = Some(RenderPipeline { fifo: fifo.clone(), commands: commands.clone(), telemetry: telemetry.clone() });
         self.drain_pending_into_pipeline();
+        // Start the output last, on its own thread: AudioOutput::run owns a
+        // long-lived loop and must never block the caller - a blocking
+        // implementation (WavDump) exiting before the worker's first
+        // flush-epoch wait would deadlock the pipeline.
+        std::thread::Builder::new()
+            .name("sda-audio-output".into())
+            .spawn(move || output.run(fifo, telemetry, commands))
+            .map_err(|error| format!("spawn audio output: {error}"))?;
         Ok(())
     }
 
@@ -327,6 +334,7 @@ impl MobileEngine {
     fn drain_pending_into_pipeline(&mut self) {
         let Some(pipeline) = &self.pipeline else { return };
         let mut pending = self.pending.lock().expect("pending lock");
+        let (mut pcm_ok, mut pcm_err) = (0_usize, 0_usize);
         while let Some(frame) = pending.pop_front() {
             for label in &frame.labels {
                 let mut declared = self.declared_sources.lock().expect("sources lock");
@@ -354,14 +362,24 @@ impl MobileEngine {
                 .iter()
                 .map(native_object_event)
                 .collect();
-            let _ = pipeline.commands.push(
+            match pipeline.commands.push(
                 render_command::RenderCommand::PcmFrame {
                     start: frame.sample_pos,
                     entries,
                     events,
                 },
-            );
+            ) {
+                Ok(()) => pcm_ok += 1,
+                Err(_) => pcm_err += 1,
+            }
         }
+        eprintln!(
+            "drain: pending_left={} pcm_ok={} pcm_err={} cmdq_len={}",
+            pending.len(),
+            pcm_ok,
+            pcm_err,
+            pipeline.commands.pending_len_for_debug(),
+        );
     }
 
     /// Drains queued frames (test accessor; FFI hosts do not see PCM).
@@ -401,6 +419,55 @@ pub mod jni;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dumps the full engine render of the JOC fixture through WavDumpOutput
+    /// so the audible content can be inspected offline (duration, envelope).
+    #[test]
+    fn dump_engine_render_for_inspection() {
+        let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        let hrtf = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/web/public/hrtf/hrtf-set.json"
+        );
+        engine.load_hrtf(hrtf).unwrap();
+        engine.feed(&joc_fixture()).unwrap();
+        let dump = std::env::temp_dir().join("sda-engine-render-dump.wav");
+        let _ = std::fs::remove_file(&dump);
+        engine
+            .start(Arc::new(sda_native_renderer::WavDumpOutput::new(&dump, 48000)))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline && !dump.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !dump.exists() {
+            let status = engine.playback_status();
+            panic!("dump never written: fifo={}", status.fifo_frames);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let wav = std::fs::read(&dump).expect("dump written");
+        let frames = (wav.len() - 44) / 4;
+        let mut envelope = Vec::new();
+        let window = 4800 * 2;
+        for chunk in wav[44..].chunks(window) {
+            let rms = (chunk
+                .chunks_exact(2)
+                .map(|s| {
+                    let v = i16::from_le_bytes([s[0], s[1]]) as f64 / 32768.0;
+                    v * v
+                })
+                .sum::<f64>()
+                / (chunk.len() / 2).max(1) as f64)
+                .sqrt();
+            envelope.push((rms * 1000.0).round() / 1000.0);
+        }
+        println!(
+            "DUMP frames={frames} (~{} ms) envelope(100ms)={:?}",
+            frames * 1000 / 48000,
+            envelope
+        );
+        assert!(frames > 24000, "expected at least 0.5 s of rendered audio");
+    }
 
     fn joc_fixture() -> Vec<u8> {
         let path = concat!(

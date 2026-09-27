@@ -53,19 +53,24 @@ class MainActivity : Activity() {
         // writer drains at the device pace.
         Thread {
             val bytes = stream.readBytes()
-            var fed = 0
             val chunk = 24 * 1024
-            var lastPushed = 0
-            while (fed < bytes.size) {
-                val end = minOf(fed + chunk, bytes.size)
-                lastPushed = nativeFeed(ptr, bytes.copyOfRange(fed, end))
-                fed = end
-                runOnUiThread {
-                    tv.text = "playing JOC/Atmos clip, frames decoded: $lastPushed, feed ${(fed * 100) / bytes.size}%"
+            var loops = 0
+            // Loop the clip so the spatial rendering can be judged over time.
+            while (true) {
+                var fed = 0
+                var lastPushed = 0
+                while (fed < bytes.size) {
+                    val end = minOf(fed + chunk, bytes.size)
+                    lastPushed = nativeFeed(ptr, bytes.copyOfRange(fed, end))
+                    fed = end
+                    Thread.sleep(10)
                 }
-                Thread.sleep(40)
+                loops++
+                runOnUiThread {
+                    tv.text = "looping JOC/Atmos render, loop $loops, last frame batch: $lastPushed"
+                }
+                Thread.sleep(1200)
             }
-            runOnUiThread { tv.text = tv.text.toString() + ", feed complete" }
         }.start()
     }
 }

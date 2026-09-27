@@ -1,0 +1,444 @@
+warning: unused variable: `all_relative`
+   --> D:\code\study\SDA\apps\native-renderer\src\occlusion.rs:108:5
+    |
+108 |     all_relative: &[[f32; 3]],
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_all_relative`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `event`
+   --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:844:36
+    |
+844 |                 } else if let Some(event) = events.iter().find(|event| !event.zone_exclusion.iter().all(|zone| zone.valid())) {
+    |                                    ^^^^^ help: if this is intentional, prefix it with an underscore: `_event`
+
+warning: type `Zone` is more private than the item `source_extent::route`
+  --> D:\code\study\SDA\apps\native-renderer\src\source_extent.rs:19:1
+   |
+19 | / pub fn route(
+20 | |     solver: &vbap::VbapSolver,
+21 | |     position: [f32; 3],
+22 | |     head: Option<[f32; 4]>,
+...  |
+26 | |     settings: Settings,
+27 | | ) -> [f32; vbap::MAX_BUS_COUNT] {
+   | |_______________________________^ function `source_extent::route` is reachable at visibility `pub`
+   |
+note: but type `Zone` is only usable at visibility `pub(crate)`
+  --> D:\code\study\SDA\apps\native-renderer\src\adm_zone.rs:6:1
+   |
+ 6 | pub(crate) enum Zone {
+   | ^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: constant `FRAME_JSON` is never used
+  --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:28:7
+   |
+28 | const FRAME_JSON: u8 = b'J';
+   |       ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `FRAME_PCM` is never used
+  --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:29:7
+   |
+29 | const FRAME_PCM: u8 = b'P';
+   |       ^^^^^^^^^
+
+warning: constant `FRAME_PCM_BATCH` is never used
+  --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:31:7
+   |
+31 | const FRAME_PCM_BATCH: u8 = b'B';
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `FRAME_HEADPHONE_FIR` is never used
+  --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:33:7
+   |
+33 | const FRAME_HEADPHONE_FIR: u8 = b'H';
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `NATIVE_RENDERER_MAX_JSON_BYTES` is never used
+  --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:34:7
+   |
+34 | const NATIVE_RENDERER_MAX_JSON_BYTES: usize = 16 * 1024;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_HEADPHONE_FIR_TAPS` is never used
+  --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:35:7
+   |
+35 | const MAX_HEADPHONE_FIR_TAPS: usize = 32_768;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `pending_suspend_recheck` and `has_any_pcm_at` are never used
+    --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:1888:8
+     |
+ 964 | impl Engine {
+     | ----------- methods in this implementation
+...
+1888 |     fn pending_suspend_recheck(&self, at: u64) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1897 |     fn has_any_pcm_at(&self, clock: u64) -> bool {
+     |        ^^^^^^^^^^^^^^
+
+warning: function `bed_route` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:2976:4
+     |
+2976 | fn bed_route(label: &str, solver: &vbap::VbapSolver) -> RouteGains {
+     |    ^^^^^^^^^
+
+warning: function `record_callback` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\lib.rs:3258:15
+     |
+3258 | pub(crate) fn record_callback(
+     |               ^^^^^^^^^^^^^^^
+
+warning: method `bus_count` is never used
+   --> D:\code\study\SDA\apps\native-renderer\src\bus_renderer.rs:107:19
+    |
+ 43 | impl BusRenderer {
+    | ---------------- method in this implementation
+...
+107 |     pub(super) fn bus_count(&self) -> usize {
+    |                   ^^^^^^^^^
+
+warning: struct `CallbackOutput` is never constructed
+ --> D:\code\study\SDA\apps\native-renderer\src\callback_output.rs:5:19
+  |
+5 | pub(super) struct CallbackOutput {
+  |                   ^^^^^^^^^^^^^^
+
+warning: associated items `new`, `reset`, `recovery_frame`, and `fill` are never used
+  --> D:\code\study\SDA\apps\native-renderer\src\callback_output.rs:16:19
+   |
+15 | impl CallbackOutput {
+   | ------------------- associated items in this implementation
+16 |     pub(super) fn new(sample_rate: u32, refill_frames: usize) -> Self {
+   |                   ^^^
+...
+28 |     pub(super) fn reset(&mut self) {
+   |                   ^^^^^
+...
+36 |     fn recovery_frame(&mut self) -> [f32; 2] {
+   |        ^^^^^^^^^^^^^^
+...
+50 |     pub(super) fn fill(
+   |                   ^^^^
+
+warning: constant `LARGE_STEP` is never used
+ --> D:\code\study\SDA\apps\native-renderer\src\output_monitor.rs:6:7
+  |
+6 | const LARGE_STEP: f32 = 0.7;
+  |       ^^^^^^^^^^
+
+warning: struct `OutputMonitor` is never constructed
+  --> D:\code\study\SDA\apps\native-renderer\src\output_monitor.rs:41:19
+   |
+41 | pub(super) struct OutputMonitor {
+   |                   ^^^^^^^^^^^^^
+
+warning: methods `reset` and `observe` are never used
+  --> D:\code\study\SDA\apps\native-renderer\src\output_monitor.rs:46:19
+   |
+45 | impl OutputMonitor {
+   | ------------------ methods in this implementation
+46 |     pub(super) fn reset(&mut self) {
+   |                   ^^^^^
+...
+50 |     pub(super) fn observe(
+   |                   ^^^^^^^
+
+warning: methods `clear`, `has_any`, and `has_at` are never used
+   --> D:\code\study\SDA\apps\native-renderer\src\pcm_ring.rs:45:19
+    |
+ 25 | impl AbsolutePcmRing {
+    | -------------------- methods in this implementation
+...
+ 45 |     pub(super) fn clear(&mut self) {
+    |                   ^^^^^
+...
+ 99 |     pub(super) fn has_any(&self) -> bool {
+    |                   ^^^^^^^
+...
+113 |     pub(super) fn has_at(&self, clock: u64) -> bool {
+    |                   ^^^^^^
+
+warning: function `read_exact_or_eof` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:1133:4
+     |
+1133 | fn read_exact_or_eof(input: &mut impl Read, bytes: &mut [u8]) -> io::Result<bool> {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `read_u16` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:1145:4
+     |
+1145 | fn read_u16(input: &mut impl Read) -> io::Result<u16> {
+     |    ^^^^^^^^
+
+warning: function `read_u32` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:1151:4
+     |
+1151 | fn read_u32(input: &mut impl Read) -> io::Result<u32> {
+     |    ^^^^^^^^
+
+warning: function `read_u64` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:1157:4
+     |
+1157 | fn read_u64(input: &mut impl Read) -> io::Result<u64> {
+     |    ^^^^^^^^
+
+warning: function `read_f32_taps` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:1163:4
+     |
+1163 | fn read_f32_taps(input: &mut impl Read, count: usize) -> io::Result<Vec<f32>> {
+     |    ^^^^^^^^^^^^^
+
+warning: function `read_frames` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:1180:15
+     |
+1180 | pub(super) fn read_frames(
+     |               ^^^^^^^^^^^
+
+warning: function `read_frame` is never used
+    --> D:\code\study\SDA\apps\native-renderer\src\protocol.rs:1213:4
+     |
+1213 | fn read_frame(
+     |    ^^^^^^^^^^
+
+warning: constant `TAPS` is never used
+ --> D:\code\study\SDA\apps\native-renderer\src\device_output.rs:4:7
+  |
+4 | const TAPS: usize = 96;
+  |       ^^^^
+
+warning: constant `PHASES` is never used
+ --> D:\code\study\SDA\apps\native-renderer\src\device_output.rs:5:7
+  |
+5 | const PHASES: usize = 1024;
+  |       ^^^^^^
+
+warning: struct `DeviceOutput` is never constructed
+ --> D:\code\study\SDA\apps\native-renderer\src\device_output.rs:7:19
+  |
+7 | pub(super) struct DeviceOutput {
+  |                   ^^^^^^^^^^^^
+
+warning: associated items `new`, `reset`, and `fill` are never used
+  --> D:\code\study\SDA\apps\native-renderer\src\device_output.rs:20:19
+   |
+19 | impl DeviceOutput {
+   | ----------------- associated items in this implementation
+20 |     pub(super) fn new(rate: u32, refill: usize) -> Self {
+   |                   ^^^
+...
+65 |     pub(super) fn reset(&mut self) {
+   |                   ^^^^^
+...
+74 |     pub(super) fn fill(
+   |                   ^^^^
+
+warning: field `0` is never read
+  --> D:\code\study\SDA\apps\native-renderer\src\output_manager.rs:64:9
+   |
+64 |     Set(Settings),
+   |     --- ^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+64 -     Set(Settings),
+64 +     Set(()),
+   |
+
+warning: field `0` is never read
+  --> D:\code\study\SDA\apps\native-renderer\src\output_manager.rs:67:12
+   |
+67 |     Remote(Option<(String, String)>),
+   |     ------ ^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+67 -     Remote(Option<(String, String)>),
+67 +     Remote(()),
+   |
+
+warning: variant `Devices` is never constructed
+  --> D:\code\study\SDA\apps\native-renderer\src\output_manager.rs:65:5
+   |
+61 | enum Request {
+   |      ------- variant in this enum
+...
+65 |     Devices(Vec<Endpoint>),
+   |     ^^^^^^^
+
+warning: `sda-native-renderer` (lib) generated 33 warnings (run `cargo fix --lib -p sda-native-renderer` to apply 2 suggestions)
+warning: constant `GAIN_EPSILON` is never used
+  --> D:\code\study\SDA\packages\core\src\vbap.rs:15:7
+   |
+15 | const GAIN_EPSILON: f64 = 1e-4;
+   |       ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `speakers` and `inv2` are never read
+  --> D:\code\study\SDA\packages\core\src\vbap.rs:21:5
+   |
+20 | struct Pair {
+   |        ---- fields in this struct
+21 |     speakers: [usize; 2],
+   |     ^^^^^^^^
+22 |     inv2: [f64; 4],
+   |     ^^^^
+   |
+   = note: `Pair` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `speakers` and `inv_basis` are never read
+  --> D:\code\study\SDA\packages\core\src\vbap.rs:27:5
+   |
+26 | struct Triplet {
+   |        ------- fields in this struct
+27 |     speakers: [usize; 3],
+   |     ^^^^^^^^
+28 |     inv_basis: [[f64; 3]; 3],
+   |     ^^^^^^^^^
+   |
+   = note: `Triplet` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `pan`, `nearest_into`, and `apply_spread` are never used
+   --> D:\code\study\SDA\packages\core\src\vbap.rs:169:8
+    |
+ 96 | impl VbapSolver {
+    | --------------- methods in this implementation
+...
+169 |     fn pan(&self, position: Vec3, spread: f64) -> Vec<f64> {
+    |        ^^^
+...
+211 |     fn nearest_into(&self, gains: &mut [f64], point: Vec3) {
+    |        ^^^^^^^^^^^^
+...
+223 |     fn apply_spread(&self, gains: &mut [f64], point: Vec3, spread: f64) {
+    |        ^^^^^^^^^^^^
+
+warning: function `normalize` is never used
+   --> D:\code\study\SDA\packages\core\src\vbap.rs:251:4
+    |
+251 | fn normalize(gains: &mut [f64]) {
+    |    ^^^^^^^^^
+
+warning: `sda-core` (lib) generated 5 warnings
+   Compiling sda-native v0.1.0 (D:\code\study\SDA\crates\sda-native)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.56s
+     Running unittests src\lib.rs (D:\sdk\rust\target\debug\deps\sda_native-6405b3a7b74e0292.exe)
+
+running 1 test
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+gate blocked: read=0 write=384000 active=true paused=false frames=0 sample_pos=0 coverage_total=0 cmdq=0
+{"type":"ack","command":"pause","accepted":true,"detail":null}
+{"type":"ack","command":"setLayout","accepted":true,"detail":null}
+drain: pending_left=0 pcm_ok=47 pcm_err=0 cmdq_len=62
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"ack","command":"addSource","accepted":true,"detail":null}
+{"type":"batchAck","start":0,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":1536,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":3072,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":4608,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":6144,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":7680,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":9216,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":10752,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":12288,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":13824,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":15360,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":16896,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":18432,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":19968,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":21504,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":23040,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":24576,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":26112,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":27648,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":29184,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":30720,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":32256,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":33792,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":35328,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":36864,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":38400,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":39936,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":41472,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":43008,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":44544,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":46080,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":47616,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":49152,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":50688,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":52224,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":53760,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":55296,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":56832,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":58368,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":59904,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":61440,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":62976,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":64512,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":66048,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":67584,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":69120,"samples":1536,"accepted":true,"detail":null}
+{"type":"batchAck","start":70656,"samples":1536,"accepted":true,"detail":null}
+
+thread 'tests::playback_status_tracks_consumed_clock' (36896) panicked at src\lib.rs:505:9:
+consumed clock never advanced: fifo=0 pending=0 consumed=0 blocks=0 callbacks=0 cmdq_len=0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::playback_status_tracks_consumed_clock ... FAILED
+
+failures:
+
+failures:
+    tests::playback_status_tracks_consumed_clock
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 48.12s
+
+error: test failed, to rerun pass `--lib`
