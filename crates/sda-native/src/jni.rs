@@ -1,5 +1,5 @@
 //! JNI boundary for the Android host (plan T2.4 first slice). Exported for
-//! `com.sda.engine.MainActivity`; keeps the handle as a raw `MobileEngine`
+//! `com.sda.nativebridge.SdaEngine`; keeps the handle as a raw `MobileEngine`
 //! pointer (long). PCM never crosses this boundary — hosts only see metadata
 //! (`DecodeStatus`) and the playback watermark.
 
@@ -33,7 +33,7 @@ fn take_engine(ptr: jlong) -> Option<&'static mut MobileEngine> {
 /// or 0 on failure. Empty `hrtfPath` skips HRTF (renders without
 /// spatialization rather than failing).
 #[no_mangle]
-pub extern "system" fn Java_com_sda_engine_MainActivity_nativeInit(
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeInit(
     mut env: JNIEnv,
     _class: JClass,
     config_json: JString,
@@ -70,7 +70,7 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeInit(
 
 /// `nativeStart(ptr: Long): Int` — 0 on success.
 #[no_mangle]
-pub extern "system" fn Java_com_sda_engine_MainActivity_nativeStart(
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeStart(
     _env: JNIEnv,
     _class: JClass,
     ptr: jlong,
@@ -87,7 +87,7 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeStart(
 /// `nativeFeed(ptr: Long, bytes: ByteArray): Int` — decoded frame count, or
 /// negative on error.
 #[no_mangle]
-pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFeed(
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeFeed(
     mut env: JNIEnv,
     _class: JClass,
     ptr: jlong,
@@ -113,7 +113,7 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFeed(
 /// `nativeStatus(ptr: Long): String` — PlaybackStatus JSON for host-side
 /// feed pacing (fifo watermark).
 #[no_mangle]
-pub extern "system" fn Java_com_sda_engine_MainActivity_nativeStatus(
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeStatus(
     mut env: JNIEnv,
     _class: JClass,
     ptr: jlong,
@@ -131,7 +131,7 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeStatus(
 
 /// `nativeFinish(ptr: Long): Int` — drains the decoder's final frame.
 #[no_mangle]
-pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFinish(
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeFinish(
     _env: JNIEnv,
     _class: JClass,
     ptr: jlong,
@@ -144,7 +144,7 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFinish(
 
 /// `nativeSetVolume(ptr: Long, volume: Float): Int`
 #[no_mangle]
-pub extern "system" fn Java_com_sda_engine_MainActivity_nativeSetVolume(
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeSetVolume(
     _env: JNIEnv,
     _class: JClass,
     ptr: jlong,
@@ -158,7 +158,7 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeSetVolume(
 
 /// `nativeClose(ptr: Long)`
 #[no_mangle]
-pub extern "system" fn Java_com_sda_engine_MainActivity_nativeClose(
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeClose(
     _env: JNIEnv,
     _class: JClass,
     ptr: jlong,

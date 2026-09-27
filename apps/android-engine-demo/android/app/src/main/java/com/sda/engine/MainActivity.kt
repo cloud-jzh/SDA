@@ -10,15 +10,7 @@ import org.json.JSONObject
 import java.io.File
 
 class MainActivity : Activity() {
-    init { System.loadLibrary("sda_native") }
-
-    private external fun nativeInit(configJson: String, hrtfPath: String): Long
-    private external fun nativeStart(ptr: Long): Int
-    private external fun nativeFeed(ptr: Long, bytes: ByteArray): Int
-    private external fun nativeStatus(ptr: Long): String
-    private external fun nativeFinish(ptr: Long): Int
-    private external fun nativeSetVolume(ptr: Long, volume: Float): Int
-    private external fun nativeClose(ptr: Long)
+    private val engine = com.sda.nativebridge.SdaEngine
 
     @Volatile private var stopRequested = false
     private var worker: Thread? = null
@@ -81,7 +73,7 @@ class MainActivity : Activity() {
                         File(hrtfDir, name).outputStream().use { output -> input.copyTo(output) }
                     }
                 }
-                ptr = nativeInit(
+                ptr = engine.nativeInit(
                     """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}""",
                     File(hrtfDir, "hrtf-set.json").absolutePath
                 )
@@ -145,7 +137,7 @@ class MainActivity : Activity() {
                 resultText = "播放失败：${error.message}"
             } finally {
                 // All JNI handle access stays on this thread, including close.
-                if (ptr != 0L) nativeClose(ptr)
+                if (ptr != 0L) engine.nativeClose(ptr)
                 runOnUiThread {
                     status.text = resultText
                     worker = null
