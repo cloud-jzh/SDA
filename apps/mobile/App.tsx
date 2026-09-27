@@ -15,19 +15,28 @@ interface VisualObject {
   pos: [number, number, number];
 }
 
-function parseStatus(statusJson: string): { samplePos: number } {
+// Mirrors Rust PlaybackStatus (crates/sda-native/src/lib.rs).
+interface PlaybackStatus {
+  consumedSamplePos: number;
+  positionMs: number;
+  fifoFrames: number;
+  paused: boolean;
+}
+
+function parseStatus(statusJson: string): PlaybackStatus {
   try {
-    return JSON.parse(statusJson) as { samplePos?: number };
+    return JSON.parse(statusJson) as PlaybackStatus;
   } catch {
-    return {};
+    return { consumedSamplePos: 0, positionMs: 0, fifoFrames: 0, paused: true };
   }
 }
 
 export default function App() {
   const [started, setStarted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
   const [status, setStatus] = useState("idle");
-  const [samplePos, setSamplePos] = useState(0);
+  const [positionMs, setPositionMs] = useState(0);
 
   useEffect(() => {
     if (!started) return;
@@ -35,7 +44,7 @@ export default function App() {
       try {
         const json = SdaEngine.status() as string;
         setStatus(json.slice(0, 160));
-        setSamplePos(parseStatus(json).samplePos ?? 0);
+        setPositionMs(parseStatus(json).positionMs);
       } catch {
         /* engine tearing down */
       }
@@ -43,19 +52,22 @@ export default function App() {
     return () => clearInterval(timer);
   }, [started]);
 
-  const startEngine = () => {
+  const startEngine = async () => {
     setError(null);
+    setStarting(true);
     try {
-      SdaEngine.initBundled();
+      await SdaEngine.initBundled();
       setStarted(true);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setStarting(false);
     }
   };
 
   // Object geometry arrives via the 66ms event stream (T2.5); for now show
   // the playback clock as moving indicators.
-  const t = samplePos / 48000;
+  const t = positionMs / 1000;
   const objects: VisualObject[] = started
     ? [
         { id: 10, pos: [Math.sin(t * 2), Math.cos(t * 2), 0.2] },
@@ -87,7 +99,7 @@ export default function App() {
         {error ?? (started ? `looping render… ${status}` : "演示模式 — 点击启动引擎")}
       </Text>
       {!started && (
-        <TouchableOpacity style={styles.button} onPress={startEngine}>
+        <TouchableOpacity style={styles.button} onPress={startEngine} disabled={starting}>
           <Text style={styles.buttonText}>启动引擎（内置 JOC/Atmos 语料循环）</Text>
         </TouchableOpacity>
       )}

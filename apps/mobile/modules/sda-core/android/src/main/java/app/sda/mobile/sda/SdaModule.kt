@@ -18,6 +18,10 @@ class SdaModule : Module() {
   private var feedThread: Thread? = null
   @Volatile private var stopped = false
 
+  // All native calls take this lock: the Rust handle is a raw &mut
+  // MobileEngine, so concurrent feed/status/volume/close would alias it.
+  private val nativeLock = Object()
+
   override fun definition() = ModuleDefinition {
     Name("SdaEngine")
 
@@ -40,10 +44,12 @@ class SdaModule : Module() {
       }
 
       val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
-      val ptr = SdaEngine.nativeInit(config, File(hrtfDir, "hrtf-set.json").absolutePath)
+      val ptr = synchronized(nativeLock) {
+        SdaEngine.nativeInit(config, File(hrtfDir, "hrtf-set.json").absolutePath)
+      }
       if (ptr == 0L) throw RuntimeException("nativeInit failed (see logcat: SdaEngine)")
       handle = ptr
-      val rc = SdaEngine.nativeStart(ptr)
+      val rc = synchronized(nativeLock) { SdaEngine.nativeStart(ptr) }
       if (rc != 0) throw RuntimeException("nativeStart failed: $rc")
 
       // Loop-feed the clip; the engine FIFO absorbs it and the AAudio writer
@@ -56,30 +62,40 @@ class SdaModule : Module() {
           var fed = 0
           while (fed < bytes.size && !stopped) {
             val end = minOf(fed + chunk, bytes.size)
-            SdaEngine.nativeFeed(handle, bytes.copyOfRange(fed, end))
+            synchronized(nativeLock) {
+              SdaEngine.nativeFeed(handle, bytes.copyOfRange(fed, end))
+            }
             fed = end
             try { Thread.sleep(10) } catch (_: InterruptedException) { return@Thread }
           }
           try { Thread.sleep(1200) } catch (_: InterruptedException) { return@Thread }
         }
       }
+      feedThread = worker
       worker.name = "sda-js-feed"
       worker.start()
     }
 
     Function("status") { ->
-      if (handle == 0L) "{}" else SdaEngine.nativeStatus(handle)
+      synchronized(nativeLock) {
+        if (handle == 0L) "{}" else SdaEngine.nativeStatus(handle)
+      }
     }
 
     Function("setVolume") { volume: Float ->
-      if (handle != 0L) SdaEngine.nativeSetVolume(handle, volume)
+      synchronized(nativeLock) {
+        if (handle != 0L) SdaEngine.nativeSetVolume(handle, volume)
+      }
     }
 
     OnDestroy {
       stopped = true
-      if (handle != 0L) {
-        SdaEngine.nativeClose(handle)
-        handle = 0L
+      feedThread?.join(2000)
+      synchronized(nativeLock) {
+        if (handle != 0L) {
+          SdaEngine.nativeClose(handle)
+          handle = 0L
+        }
       }
     }
   }
