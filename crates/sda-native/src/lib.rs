@@ -479,9 +479,9 @@ mod tests {
         engine.load_hrtf(hrtf).unwrap();
         let dump = std::env::temp_dir().join("song-render-dump.wav");
         let _ = std::fs::remove_file(&dump);
-        engine
-            .start(Arc::new(sda_native_renderer::WavDumpOutput::new(&dump, 48000)))
-            .unwrap();
+        let sink = Arc::new(sda_native_renderer::WavDumpOutput::new(&dump, 48000));
+        let stop_flag = sink.stop.clone();
+        engine.start(sink).unwrap();
         let bytes = std::fs::read(song).unwrap();
         let chunk = 24 * 1024;
         let mut fed = 0;
@@ -522,6 +522,61 @@ mod tests {
         assert!(frames > 48000, "expected over 1 s of rendered audio");
     }
 
+    /// Same as dump_song_render but WITHOUT HRTF: isolates whether the
+    /// distortion enters via the HRTF convolution path or the routing/mixer.
+    #[test]
+    fn dump_song_render_nohrtf() {
+        let song = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/android-engine-demo/android/app/src/main/assets/song.eac3"
+        );
+        let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        let dump = std::env::temp_dir().join("song-render-nohrtf.wav");
+        let _ = std::fs::remove_file(&dump);
+        let sink = Arc::new(sda_native_renderer::WavDumpOutput::new(&dump, 48000));
+        let stop_flag = sink.stop.clone();
+        engine.start(sink).unwrap();
+        let bytes = std::fs::read(song).unwrap();
+        let chunk = 24 * 1024;
+        let mut fed = 0;
+        while fed < bytes.len() {
+            let end = (fed + chunk).min(bytes.len());
+            engine.feed(&bytes[fed..end]).unwrap();
+            fed = end;
+            while engine.playback_status().fifo_frames > 12000 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        // Feed is done: stop the writer so it flushes and exits.
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline && !dump.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(dump.exists(), "render dump never written");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let wav = std::fs::read(&dump).expect("dump readable");
+        let frames = (wav.len() - 44) / 4;
+        let mut envelope = Vec::new();
+        for chunk in wav[44..].chunks(4800 * 2) {
+            let rms = (chunk
+                .chunks_exact(2)
+                .map(|s| {
+                    let v = i16::from_le_bytes([s[0], s[1]]) as f64 / 32768.0;
+                    v * v
+                })
+                .sum::<f64>()
+                / (chunk.len() / 2).max(1) as f64)
+                .sqrt();
+            envelope.push((rms * 1000.0).round() / 1000.0);
+        }
+        println!(
+            "NOHRTF_DUMP frames={frames} (~{} ms) envelope={:?}",
+            frames * 1000 / 48000,
+            envelope
+        );
+    }
+
     /// Dumps the full engine render of the JOC fixture through WavDumpOutput
     /// so the audible content can be inspected offline (duration, envelope).
     #[test]
@@ -535,8 +590,10 @@ mod tests {
         engine.feed(&joc_fixture()).unwrap();
         let dump = std::env::temp_dir().join("sda-engine-render-dump.wav");
         let _ = std::fs::remove_file(&dump);
+        let sink = Arc::new(sda_native_renderer::WavDumpOutput::new(&dump, 48000));
+        let stop_flag = sink.stop.clone();
         engine
-            .start(Arc::new(sda_native_renderer::WavDumpOutput::new(&dump, 48000)))
+            .start(sink)
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while std::time::Instant::now() < deadline && !dump.exists() {

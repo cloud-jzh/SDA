@@ -299,11 +299,19 @@ pub trait AudioOutput: Send + Sync {
 pub struct WavDumpOutput {
     pub path: std::path::PathBuf,
     pub sample_rate: u32,
+    /// Cooperative stop: set to true to make the writer flush its buffer to
+    /// disk and exit. Without this, a continuously fed sink never goes idle
+    /// and the buffered audio never reaches the file.
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl WavDumpOutput {
     pub fn new(path: impl Into<std::path::PathBuf>, sample_rate: u32) -> Self {
-        Self { path: path.into(), sample_rate }
+        Self {
+            path: path.into(),
+            sample_rate,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 }
 
@@ -317,8 +325,21 @@ impl AudioOutput for WavDumpOutput {
         let mut interleaved: Vec<f32> = Vec::new();
         let mut block = [0.0_f32; 2048];
         let mut idle_polls = 0_u32;
+        let mut dump_polls = 0_u32;
         loop {
+            if self.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
             let popped = fifo.pop_into_f32(&mut block, 2);
+            dump_polls += 1;
+            if dump_polls % 200 == 0 {
+                eprintln!(
+                    "wavdump alive: popped_now={popped} buffered={} idle={} fifo_read={}",
+                    interleaved.len() / 2,
+                    idle_polls,
+                    fifo.available_read()
+                );
+            }
             if popped > 0 {
                 interleaved.extend_from_slice(&block[..popped]);
                 idle_polls = 0;
@@ -3200,9 +3221,15 @@ pub fn spawn_render_worker(
                 // Do not synthesize missing decoder batches while the output
                 // FIFO still contains earlier audio: doing so advances the codec
                 // clock and permanently discards the late real samples as stale.
-                let frames = engine
+                let mut frames = engine
                     .pcm_coverage
                     .available(engine.sample_pos, convolution::DEFAULT_PARTITION);
+                // Clamp to the FIFO's free space: render_into advances the
+                // codec clock and discard_before drops the consumed coverage,
+                // so a partial push (render size > free space) would
+                // permanently lose the tail. Mobile feeding fills coverage in
+                // large bursts and regularly hit this.
+                frames = frames.min(fifo.available_write());
                 let synchronized = remote_sync::ENABLED.load(Ordering::Acquire);
                 // Dense ADM runs close to the CPU deadline. A larger rendered
                 // reserve absorbs scheduler/remote-video bursts without changing
