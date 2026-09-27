@@ -107,6 +107,25 @@ pub extern "system" fn Java_com_sda_engine_MainActivity_nativeFeed(
     }
 }
 
+/// `nativeStatus(ptr: Long): String` — PlaybackStatus JSON for host-side
+/// feed pacing (fifo watermark).
+#[no_mangle]
+pub extern "system" fn Java_com_sda_engine_MainActivity_nativeStatus(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jni::sys::jstring {
+    let fallback = "".to_string();
+    let json = match take_engine(ptr) {
+        Some(engine) => serde_json::to_string(&engine.playback_status())
+            .unwrap_or_else(|_| fallback.clone()),
+        None => fallback.clone(),
+    };
+    env.new_string(json)
+        .map(|value| value.into_raw())
+        .unwrap_or_else(|_| std::ptr::null_mut())
+}
+
 /// `nativeClose(ptr: Long)`
 #[no_mangle]
 pub extern "system" fn Java_com_sda_engine_MainActivity_nativeClose(

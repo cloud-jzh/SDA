@@ -11,6 +11,7 @@ class MainActivity : Activity() {
     private external fun nativeInit(configJson: String, hrtfPath: String): Long
     private external fun nativeStart(ptr: Long): Int
     private external fun nativeFeed(ptr: Long, bytes: ByteArray): Int
+    private external fun nativeStatus(ptr: Long): String
     private external fun nativeClose(ptr: Long)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -30,12 +31,12 @@ class MainActivity : Activity() {
                 File(hrtfDir, name).outputStream().use { output -> input.copyTo(output) }
             }
         }
-        val stream = File(filesDir, "joc_atmos_1s.eac3")
-        assets.open("joc_atmos_1s.eac3").use { input ->
+        val stream = File(filesDir, "song.eac3")
+        assets.open("song.eac3").use { input ->
             stream.outputStream().use { output -> input.copyTo(output) }
         }
 
-        val config = """{"sampleRate":48000,"outputChannels":2}"""
+        val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
         val hrtfJson = File(hrtfDir, "hrtf-set.json").absolutePath
         val ptr = nativeInit(config, hrtfJson)
         if (ptr == 0L) {
@@ -49,28 +50,27 @@ class MainActivity : Activity() {
             return
         }
 
-        // Feed the whole clip; the engine FIFO absorbs it and the AAudio
-        // writer drains at the device pace.
+        // Feed the song paced to roughly real time: the render pipeline keeps
+        // only a small FIFO (341 ms target) and the command queue caps PCM at
+        // 16 MB, so un-paced feeding of a long file would silently drop
+        // chunks. 24 KB at 448 kb/s is ~0.43 s of audio per chunk.
         Thread {
             val bytes = stream.readBytes()
             val chunk = 24 * 1024
-            var loops = 0
-            // Loop the clip so the spatial rendering can be judged over time.
-            while (true) {
-                var fed = 0
-                var lastPushed = 0
-                while (fed < bytes.size) {
-                    val end = minOf(fed + chunk, bytes.size)
-                    lastPushed = nativeFeed(ptr, bytes.copyOfRange(fed, end))
-                    fed = end
-                    Thread.sleep(10)
-                }
-                loops++
+            var fed = 0
+            var lastPushed = 0
+            while (fed < bytes.size) {
+                val end = minOf(fed + chunk, bytes.size)
+                lastPushed = nativeFeed(ptr, bytes.copyOfRange(fed, end))
+                fed = end
+                // Pacing: chunk holds ~0.43 s of encoded audio.
+                Thread.sleep(430)
                 runOnUiThread {
-                    tv.text = "looping JOC/Atmos render, loop $loops, last frame batch: $lastPushed"
+                    val seconds = fed * 8L / 448000L
+                    tv.text = "playing song.eac3, fed ${seconds}s / ${bytes.size * 8L / 448000L}s (frames $lastPushed)"
                 }
-                Thread.sleep(1200)
             }
+            runOnUiThread { tv.text = "playback complete (song.eac3)" }
         }.start()
     }
 }
