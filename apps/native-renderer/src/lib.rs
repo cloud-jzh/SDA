@@ -3198,6 +3198,29 @@ pub fn spawn_render_worker(
                     static DIAG_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     let tick = DIAG_TICK.fetch_add(1, Ordering::Relaxed);
                     if tick % 200 == 0 {
+                        #[cfg(target_os = "android")]
+                        {
+                            unsafe extern "C" {
+                                fn __android_log_write(prio: i32, tag: *const u8, text: *const u8) -> i32;
+                            }
+                            let msg = format!(
+                                "gate blocked: read={} write={} active={} paused={} frames={frames} sample_pos={} coverage_total={} cmdq={}",
+                                fifo.available_read(),
+                                fifo.available_write(),
+                                engine.output_active,
+                                engine.paused,
+                                engine.sample_pos,
+                                engine.pcm_coverage.available(0, 48000),
+                                commands.pending_len_for_debug(),
+                            );
+                            let mut text = msg.as_bytes().to_vec();
+                            text.push(0);
+                            let tag = b"SdaGate ".to_vec();
+                            unsafe {
+                                __android_log_write(4, tag.as_ptr(), text.as_ptr());
+                            }
+                        }
+                        #[cfg(not(target_os = "android"))]
                         eprintln!(
                             "gate blocked: read={} write={} active={} paused={} frames={frames} sample_pos={} coverage_total={} cmdq={}",
                             fifo.available_read(),
