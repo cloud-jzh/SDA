@@ -2,7 +2,7 @@
   "name": "@sda/mobile",
   "version": "0.1.0",
   "private": true,
-  "main": "expo/AppEntry.js",
+  "main": "index.js",
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
