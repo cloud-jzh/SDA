@@ -151,24 +151,21 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - uses: nttld/setup-ndk@v1
-        id: apk-ndk
-        with:
-          ndk-version: 26.1.10909125
-
       - name: Diagnose runner Android SDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME}"
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          ls -la "$ANDROID_SDK_ROOT" "$ANDROID_SDK_ROOT/cmdline-tools" 2>&1 || true
-          find "$ANDROID_SDK_ROOT" -maxdepth 5 -name sdkmanager -type f 2>/dev/null | head -10 || true
+          test -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --version
 
-      - name: Install Android SDK platform and CMake
+      - name: Install Android platform, NDK, and CMake
         run: |
           SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1"
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang"
+        env:
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/26.1.10909125
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
@@ -183,7 +180,7 @@ jobs:
         run: cargo ndk -t x86_64 -P 26 -o ../../apps/mobile/android/app/src/main/jniLibs --manifest-path Cargo.toml -- build --release
         working-directory: crates/sda-native
         env:
-          ANDROID_NDK_HOME: ${{ steps.apk-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/26.1.10909125
           MACINDECODE_AC4_SPEC_DIR: ${{ github.workspace }}/tmp/MacinDecode-AC4-Core/spec
 
       - name: Configure Android SDK location
