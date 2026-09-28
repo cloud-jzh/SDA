@@ -118,3 +118,70 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           MACINDECODE_AC4_SPEC_DIR: ${{ github.workspace }}/tmp/MacinDecode-AC4-Core/spec
+
+  expo-android-apk:
+    name: Expo Android Release APK (MuMu x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+          targets: x86_64-linux-android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK, and CMake
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Prepare AC-4 spec tables
+        run: node scripts/prepare-ac4.mjs
+
+      - name: Install workspace dependencies (Expo SDK 52 hoisted layout)
+        run: pnpm install --frozen-lockfile --config.node-linker=hoisted
+
+      - name: Build Rust engine for MuMu x86_64
+        run: cargo ndk -t x86_64 --platform 26 --release -o apps/mobile/android/app/src/main/jniLibs build
+        working-directory: .
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.1.10909125
+          MACINDECODE_AC4_SPEC_DIR: ${{ github.workspace }}/tmp/MacinDecode-AC4-Core/spec
+
+      - name: Configure Android SDK location
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > apps/mobile/android/local.properties
+
+      - name: Clear generated autolinking cache
+        run: rm -rf apps/mobile/android/build/generated/autolinking apps/mobile/android/app/build/generated/autolinking
+
+      - name: Build Expo Release APK
+        run: ./gradlew --no-daemon assembleRelease
+        working-directory: apps/mobile/android
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sda-expo-android-release-x86_64
+          path: apps/mobile/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
