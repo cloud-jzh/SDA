@@ -148,11 +148,12 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Verify runner Android SDK
+      - name: Diagnose runner Android SDK
         run: |
-          echo "ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          test -n "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          command -v sdkmanager
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          ls -la "$HOME/.android" "$ANDROID_HOME" "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk /opt/android-sdk 2>&1 || true
+          find "$HOME" /usr/local/lib/android/sdk /opt/android-sdk -maxdepth 5 -name sdkmanager -type f 2>/dev/null | head -20 || true
 
       - name: Install Android SDK, NDK, and CMake
         run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
