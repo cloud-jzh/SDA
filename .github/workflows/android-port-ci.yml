@@ -190,8 +190,18 @@ jobs:
         run: rm -rf apps/mobile/android/build/generated/autolinking apps/mobile/android/app/build/generated/autolinking
 
       - name: Build Expo Release APK
-        run: ./gradlew --no-daemon assembleRelease
+        run: ./gradlew --no-daemon --stacktrace --info assembleRelease
         working-directory: apps/mobile/android
+
+      - name: Dump Gradle failure details
+        if: failure()
+        run: |
+          echo "--- gradle build output ---"
+          tail -250 apps/mobile/android/build/outputs/logs/manifest-merger-release-report.txt 2>/dev/null || true
+          echo "--- daemon logs ---"
+          find ~/.gradle/daemon -name 'daemon-*.out.log' -type f -printf '%T@ %p\\n' | sort -nr | head -1 | cut -d' ' -f2- | xargs -r tail -250
+          echo "--- CMake logs ---"
+          find apps/mobile/android node_modules/expo-modules-core/android -name '*.log' -type f -print -exec tail -60 {} \\; 2>/dev/null | tail -300
 
       - uses: actions/upload-artifact@v4
         with:
