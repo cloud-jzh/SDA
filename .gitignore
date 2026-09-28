@@ -50,3 +50,7 @@ apps/desktop/native-renderer/SdaNativeRenderer.exe
 /outlogs/
 
 /apps/desktop/performance-core/
+# Local IDE state, Expo dev state, and user audio media.
+.idea/
+apps/mobile/.expo/
+*.mp3
