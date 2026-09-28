@@ -142,6 +142,20 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeFinish(
     }
 }
 
+/// `nativePause(ptr: Long, paused: Boolean): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativePause(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    paused: jni::sys::jboolean,
+) -> jint {
+    match take_engine(ptr) {
+        Some(engine) => engine.set_paused(paused != 0).map(|_| 0).unwrap_or(-1),
+        None => -2,
+    }
+}
+
 /// `nativeSetVolume(ptr: Long, volume: Float): Int`
 #[no_mangle]
 pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeSetVolume(

@@ -13,6 +13,7 @@ object SdaEngine {
     external fun nativeFeed(ptr: Long, bytes: ByteArray): Int
     external fun nativeStatus(ptr: Long): String
     external fun nativeFinish(ptr: Long): Int
+    external fun nativePause(ptr: Long, paused: Boolean): Int
     external fun nativeSetVolume(ptr: Long, volume: Float): Int
     external fun nativeClose(ptr: Long)
 }

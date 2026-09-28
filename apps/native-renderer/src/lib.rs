@@ -848,6 +848,8 @@ impl ObjectActivitySnapshot {
 #[derive(Default)]
 pub struct RuntimeTelemetry {
     pub shutdown_requested: AtomicBool,
+    /// Renderer-applied pause state exposed to mobile status polling.
+    pub paused: AtomicBool,
     callback_output_enabled: AtomicBool,
     /// Codec timeline consumed by the audio output, never the worker's
     /// render-ahead clock. Read by mobile hosts as the presentation clock.

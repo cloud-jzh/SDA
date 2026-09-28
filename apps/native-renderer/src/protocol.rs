@@ -740,6 +740,7 @@ fn handle_command(
         Command::Pause { paused } => {
             if state.paused != paused {
                 state.paused = paused;
+                telemetry.paused.store(paused, Ordering::Release);
                 if remote_sync::ENABLED.load(Ordering::Acquire) {
                     // Keep both copies of queued program audio. The shared clock
                     // schedules the real consumers; pausing must not create an epoch.

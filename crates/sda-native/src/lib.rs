@@ -260,7 +260,7 @@ impl MobileEngine {
                     .callback_consumed_sample_pos
                     .load(std::sync::atomic::Ordering::Acquire),
                 pipeline.fifo.available_read(),
-                false,
+                pipeline.telemetry.paused.load(std::sync::atomic::Ordering::Acquire),
             ),
             None => (0, 0, true),
         };
