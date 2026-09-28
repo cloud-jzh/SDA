@@ -189,21 +189,31 @@ jobs:
       - name: Clear generated autolinking cache
         run: rm -rf apps/mobile/android/build/generated/autolinking apps/mobile/android/app/build/generated/autolinking
 
+      - name: Verify Android build environment
+        run: |
+          java -version 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "sdk=$ANDROID_SDK_ROOT" | tee -a "$GITHUB_STEP_SUMMARY"
+          test -x "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang"
+          cargo ndk --version | tee -a "$GITHUB_STEP_SUMMARY"
+          df -h "$GITHUB_WORKSPACE" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Build Expo Release APK
+        id: expo-build
         shell: bash
         run: |
-          set -o pipefail
-          ./gradlew --no-daemon --max-workers=2 --stacktrace --info assembleRelease 2>&1 | tee expo-gradle.log
+          set +e
+          ./gradlew --no-daemon --max-workers=2 --stacktrace assembleRelease > expo-gradle.log 2>&1
+          code=$?
+          tail -100 expo-gradle.log | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "gradle_exit=$code" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $code
         working-directory: apps/mobile/android
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sda-expo-android-build-logs
-          path: |
-            apps/mobile/android/expo-gradle.log
-            apps/mobile/android/release-build.log
-            apps/mobile/android/app/build/outputs/logs/manifest-merger-release-report.txt
+          path: apps/mobile/android/expo-gradle.log
           if-no-files-found: warn
           retention-days: 14
 
