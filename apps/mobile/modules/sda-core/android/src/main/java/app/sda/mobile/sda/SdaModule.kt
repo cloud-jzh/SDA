@@ -3,34 +3,24 @@ package app.sda.mobile.sda
 import com.sda.nativebridge.SdaEngine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import org.json.JSONObject
 import java.io.File
 
-/**
- * Expo module wrapping the shared JNI bridge (com.sda.nativebridge.SdaEngine).
- *
- * `initBundled()` stages the bundled JOC/Atmos fixture and HRTF set to
- * filesDir, initialises + starts the engine, and keeps a loop thread feeding
- * the clip - the JS side just calls it once and listens for status. PCM never
- * crosses to JS.
- */
+/** Expo bridge. PCM stays native; the feed loop follows the consumed clock. */
 class SdaModule : Module() {
   private var handle: Long = 0L
   private var feedThread: Thread? = null
   @Volatile private var stopped = false
-
-  // All native calls take this lock: the Rust handle is a raw &mut
-  // MobileEngine, so concurrent feed/status/volume/close would alias it.
+  private var feedError: String? = null
   private val nativeLock = Object()
 
   override fun definition() = ModuleDefinition {
     Name("SdaEngine")
 
     AsyncFunction("initBundled") {
-      val context = appContext?.reactContext
-        ?: throw RuntimeException("no react context")
+      val context = appContext?.reactContext ?: throw RuntimeException("no react context")
       val filesDir = context.filesDir
 
-      // Stage HRTF set + stream from native assets into filesDir.
       val hrtfDir = File(filesDir, "hrtf")
       hrtfDir.mkdirs()
       context.assets.list("hrtf")?.forEach { name ->
@@ -43,37 +33,72 @@ class SdaModule : Module() {
         stream.outputStream().use { output -> input.copyTo(output) }
       }
 
-      val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
-      val ptr = synchronized(nativeLock) {
-        SdaEngine.nativeInit(config, File(hrtfDir, "hrtf-set.json").absolutePath)
-      }
-      if (ptr == 0L) throw RuntimeException("nativeInit failed (see logcat: SdaEngine)")
-      handle = ptr
-      val rc = synchronized(nativeLock) { SdaEngine.nativeStart(ptr) }
-      if (rc != 0) throw RuntimeException("nativeStart failed: $rc")
-
-      // Loop-feed the clip; the engine FIFO absorbs it and the AAudio writer
-      // drains at device pace.
-      stopped = false
-      val worker = Thread {
-        val bytes = stream.readBytes()
-        val chunk = 24 * 1024
-        while (!stopped) {
-          var fed = 0
-          while (fed < bytes.size && !stopped) {
-            val end = minOf(fed + chunk, bytes.size)
-            synchronized(nativeLock) {
-              SdaEngine.nativeFeed(handle, bytes.copyOfRange(fed, end))
-            }
-            fed = end
-            try { Thread.sleep(10) } catch (_: InterruptedException) { return@Thread }
-          }
-          try { Thread.sleep(1200) } catch (_: InterruptedException) { return@Thread }
+      synchronized(nativeLock) {
+        if (handle != 0L) throw RuntimeException("engine already initialized")
+        stopped = false
+        feedError = null
+        val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
+        val ptr = SdaEngine.nativeInit(config, File(hrtfDir, "hrtf-set.json").absolutePath)
+        if (ptr == 0L) throw RuntimeException("nativeInit failed (see logcat: SdaEngine)")
+        handle = ptr
+        val rc = SdaEngine.nativeStart(ptr)
+        if (rc != 0) {
+          SdaEngine.nativeClose(ptr)
+          handle = 0L
+          throw RuntimeException("nativeStart failed: $rc")
         }
       }
+
+      val worker = Thread {
+        try {
+          val bytes = stream.readBytes()
+          val chunk = 24 * 1024
+          var lastConsumed = 0L
+          var lastProgressNs = System.nanoTime()
+          val maxLeadSamples = 48000L
+          while (!stopped) {
+            val status = synchronized(nativeLock) {
+              if (handle == 0L) return@Thread
+              JSONObject(SdaEngine.nativeStatus(handle))
+            }
+            val decoded = status.getLong("decodedSamplePos")
+            val consumed = status.getLong("consumedSamplePos")
+            val now = System.nanoTime()
+            if (consumed != lastConsumed) {
+              lastConsumed = consumed
+              lastProgressNs = now
+            }
+            check(decoded == 0L || now - lastProgressNs < 15_000_000_000L) {
+              "audio consumption stalled (decoded=$decoded consumed=$consumed)"
+            }
+
+            if (decoded - consumed > maxLeadSamples) {
+              Thread.sleep(20)
+              continue
+            }
+
+            var fed = 0
+            while (fed < bytes.size && !stopped) {
+              val end = minOf(fed + chunk, bytes.size)
+              val result = synchronized(nativeLock) {
+                if (handle == 0L) -1 else SdaEngine.nativeFeed(handle, bytes.copyOfRange(fed, end))
+              }
+              check(result >= 0) { "nativeFeed failed: $result" }
+              fed = end
+            }
+            Thread.sleep(1200)
+          }
+        } catch (error: InterruptedException) {
+          Thread.currentThread().interrupt()
+        } catch (error: Throwable) {
+          feedError = error.message ?: error.toString()
+        }
+      }.apply {
+        name = "sda-js-feed"
+        start()
+      }
       feedThread = worker
-      worker.name = "sda-js-feed"
-      worker.start()
+      true
     }
 
     Function("status") { ->
@@ -88,9 +113,14 @@ class SdaModule : Module() {
       }
     }
 
+    Function("feedError") { -> feedError }
+
     OnDestroy {
       stopped = true
-      feedThread?.join(2000)
+      val worker = feedThread
+      worker?.interrupt()
+      worker?.join()
+      feedThread = null
       synchronized(nativeLock) {
         if (handle != 0L) {
           SdaEngine.nativeClose(handle)
