@@ -122,6 +122,9 @@ jobs:
   expo-android-apk:
     name: Expo Android Release APK (MuMu x86_64)
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
         with:
@@ -148,15 +151,24 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
+      - uses: nttld/setup-ndk@v1
+        id: apk-ndk
+        with:
+          ndk-version: 26.1.10909125
+
       - name: Diagnose runner Android SDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME}"
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          ls -la "$HOME/.android" "$ANDROID_HOME" "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk /opt/android-sdk 2>&1 || true
-          find "$HOME" /usr/local/lib/android/sdk /opt/android-sdk -maxdepth 5 -name sdkmanager -type f 2>/dev/null | head -20 || true
+          ls -la "$ANDROID_SDK_ROOT" "$ANDROID_SDK_ROOT/cmdline-tools" 2>&1 || true
+          find "$ANDROID_SDK_ROOT" -maxdepth 5 -name sdkmanager -type f 2>/dev/null | head -10 || true
 
-      - name: Install Android SDK, NDK, and CMake
-        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;26.1.10909125" "cmake;3.22.1"
+      - name: Install Android SDK platform and CMake
+        run: |
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1"
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
@@ -168,10 +180,10 @@ jobs:
         run: pnpm install --frozen-lockfile --config.node-linker=hoisted
 
       - name: Build Rust engine for MuMu x86_64
-        run: cargo ndk -t x86_64 --platform 26 --release -o apps/mobile/android/app/src/main/jniLibs build
-        working-directory: .
+        run: cargo ndk -t x86_64 -P 26 -o ../../apps/mobile/android/app/src/main/jniLibs --manifest-path Cargo.toml -- build --release
+        working-directory: crates/sda-native
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.1.10909125
+          ANDROID_NDK_HOME: ${{ steps.apk-ndk.outputs.ndk-path }}
           MACINDECODE_AC4_SPEC_DIR: ${{ github.workspace }}/tmp/MacinDecode-AC4-Core/spec
 
       - name: Configure Android SDK location
