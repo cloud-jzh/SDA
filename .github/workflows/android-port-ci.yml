@@ -202,6 +202,7 @@ jobs:
         shell: bash
         run: |
           set +e
+          chmod +x ./gradlew
           ./gradlew --no-daemon --max-workers=2 --stacktrace assembleRelease > expo-gradle.log 2>&1
           code=$?
           tail -100 expo-gradle.log | tee -a "$GITHUB_STEP_SUMMARY"
