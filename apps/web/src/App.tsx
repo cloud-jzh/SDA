@@ -1125,7 +1125,9 @@ export function App() {
       // storing every sample here re-rendered the entire Three.js interface
       // ten times per second and competed with remote-desktop video encoding.
       nativeRendererRunningRef.current = next.running === true;
-      if (Number.isSafeInteger(next.samplePos)) nativeRendererSampleRef.current = next.samplePos;
+      if (typeof next.samplePos === "number" && Number.isSafeInteger(next.samplePos)) {
+        nativeRendererSampleRef.current = next.samplePos;
+      }
       nativeRemoteSyncRef.current = next.remoteSynchronized === true;
       nativeRemoteWaitingRef.current = next.remoteSyncWaiting === true;
       setNativeRendererStatus((previous) => {
