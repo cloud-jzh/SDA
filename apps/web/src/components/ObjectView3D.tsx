@@ -15,18 +15,18 @@ import { Html, OrbitControls, RoundedBox } from "@react-three/drei";
 import * as THREE from "three";
 import { ImmersiveCamera, immersiveInputTarget, type ImmersiveView } from "./ImmersiveCamera";
 import { Maximize, Minimize, PersonStanding, Plane, Eye } from "lucide-react";
+import { admToScenePosition, SCENE_CEILING_Y, SCENE_FLOOR_Y, SCENE_ROOM_HALF_EXTENT, SCENE_WALL_HEIGHT, SCENE_WALL_MID_Y, smoothScenePosition, speakerScenePosition } from "../../../../packages/renderer/src/scene-coordinates";
 import { sphericalToWebAudio } from "../../../../packages/renderer/src/coords";
 import type { VirtualSpeaker } from "@sda/renderer";
 import type { VisualObject } from "@sda/player";
 import { speakerLabel } from "../speaker-labels";
 export type { VisualObject };
 
-const ROOM = 2; // half-extent of the room footprint in scene units
-// 物理房间：地板在听者脚下，天花板在 ADM z = +1 处（耳位高度约为房高的 2/7）
-const FLOOR_Y = -0.6;
-const CEIL_Y = ROOM;
-const WALL_H = CEIL_Y - FLOOR_Y;
-const WALL_MID_Y = (CEIL_Y + FLOOR_Y) / 2;
+const ROOM = SCENE_ROOM_HALF_EXTENT; // half-extent of the room footprint in scene units
+const FLOOR_Y = SCENE_FLOOR_Y;
+const CEIL_Y = SCENE_CEILING_Y;
+const WALL_H = SCENE_WALL_HEIGHT;
+const WALL_MID_Y = SCENE_WALL_MID_Y;
 
 export type Theme = "dark" | "light";
 
@@ -100,12 +100,6 @@ function FrameScheduler({ children, maxFps }: { children: ReactNode; maxFps: num
   }, [invalidate, maxFps]);
   useEffect(() => () => cancelAnimationFrame(handle.current), []);
   return <RequestFrameContext.Provider value={requestFrame}>{children}</RequestFrameContext.Provider>;
-}
-
-/** ADM cartesian → scene position (three.js: x right, y up, z toward viewer;
- *  ADM: x right, y front, z up —— ITU-R BS.2076：+X 是右，与 Omniphony/EAR 一致). */
-function admToScene(pos: [number, number, number]): [number, number, number] {
-  return [pos[0] * ROOM, pos[2] * ROOM, -pos[1] * ROOM];
 }
 
 /** 仿真力 The Ones 同轴音箱：圆角箱体 + 大椭圆波导 + 中央同轴单元 + Iso-Pod 支架。
@@ -223,11 +217,7 @@ const SpeakerRing = memo(function SpeakerRing({ layout, focusedSpeakers, onSpeak
   const speakers = useMemo(
     () =>
       layout.map((s) => {
-        const [x, y, z] = sphericalToWebAudio(s);
-        // 低音炮：按真力指南沿前墙摆放、略偏离中轴线（音频定位仍用布局的 45°）
-        const position = s.isLfe
-          ? new THREE.Vector3(-0.7, FLOOR_Y + 0.13, -ROOM + 0.13)
-          : new THREE.Vector3(x * ROOM, y * ROOM, z * ROOM);
+        const position = new THREE.Vector3(...speakerScenePosition(s));
         const dummy = new THREE.Object3D();
         dummy.position.copy(position);
         if (s.isLfe) dummy.lookAt(0, FLOOR_Y + 0.13, 0);
@@ -406,7 +396,7 @@ const ObjectDot = memo(function ObjectDot({
   theme: Theme;
 }) {
   const ref = useRef<THREE.Group>(null);
-  const initialPosition = useMemo(() => admToScene(obj.pos), []);
+  const initialPosition = useMemo(() => admToScenePosition(obj.pos), []);
   const target = useMemo(() => new THREE.Vector3(), []);
   const requestFrame = useContext(RequestFrameContext);
   useEffect(() => requestFrame(), [requestFrame, obj.pos[0], obj.pos[1], obj.pos[2]]);
@@ -416,8 +406,9 @@ const ObjectDot = memo(function ObjectDot({
     // the view). The exponential factor is frame-rate independent — the old
     // clamped linear factor reached 1 after frame gaps and snapped the dot to
     // the target instead of easing.
-    target.set(...admToScene(obj.pos));
-    ref.current.position.lerp(target, 1 - Math.exp(-dt * 20));
+    target.set(...admToScenePosition(obj.pos));
+    const next = smoothScenePosition(ref.current.position.toArray() as [number, number, number], target.toArray() as [number, number, number], dt);
+    ref.current.position.set(...next);
     if (ref.current.position.distanceToSquared(target) > 1e-8) requestFrame();
   });
   const height = obj.pos[2]; // ADM z = up
