@@ -6,8 +6,9 @@ const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, '../..');
 const rnPackage = require.resolve('react-native/package.json', { paths: [projectRoot] });
 const reactPackage = require.resolve('react/package.json', { paths: [path.dirname(rnPackage)] });
-const reactRoot = path.dirname(reactPackage);
+const reactRoot = fs.realpathSync.native(path.dirname(reactPackage));
 const config = getDefaultConfig(projectRoot);
+config.resolver.disableHierarchicalLookup = true;
 
 config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
 config.resolver.nodeModulesPaths = [
@@ -17,29 +18,29 @@ config.resolver.nodeModulesPaths = [
 config.resolver.extraNodeModules = {
   ...(config.resolver.extraNodeModules ?? {}),
   react: reactRoot,
+  'react-native': path.dirname(rnPackage),
 };
 
 const defaultResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  const match = /^react(?:\/(.*))?$/.exec(moduleName);
+  if (match) {
+    const request = match[1] ? path.join(reactRoot, match[1]) : path.join(reactRoot, 'index.js');
+    const resolvedReactFile = require.resolve(request, { paths: [reactRoot] });
+    return { type: 'sourceFile', filePath: resolvedReactFile };
+  }
   const resolved = defaultResolveRequest
     ? defaultResolveRequest(context, moduleName, platform)
     : context.resolveRequest(context, moduleName, platform);
   if (resolved.type !== 'sourceFile') return resolved;
 
-  let realPath;
-  try {
-    realPath = fs.realpathSync.native(resolved.filePath);
-  } catch {
-    return resolved;
-  }
-  const normalized = realPath.split(path.sep).join('/');
+  const normalized = resolved.filePath.split(path.sep).join('/');
   const marker = '/node_modules/react/';
   const index = normalized.lastIndexOf(marker);
   if (index < 0) return resolved;
-
   const suffix = normalized.slice(index + marker.length);
   const canonical = path.join(reactRoot, suffix);
-  return { ...resolved, filePath: canonical };
+  return fs.existsSync(canonical) ? { type: 'sourceFile', filePath: canonical } : resolved;
 };
 
 module.exports = config;

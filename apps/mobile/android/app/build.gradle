@@ -16,13 +16,14 @@ react {
 
     // Use Expo CLI to bundle the app, this ensures the Metro config
     // works correctly with Expo projects.
-    cliFile = new File(["node", "--print", "require.resolve('@expo/cli', { paths: [require.resolve('expo/package.json')] })"].execute(null, rootDir).text.trim())
+    cliFile = new File(projectRoot, "scripts/expo-embed.cjs")
     bundleCommand = "export:embed"
     bundleConfig = new File(projectRoot, "metro.config.js")
+    extraPackagerArgs = ["--max-workers", "2"]
 
     /* Folders */
      //   The root of your project, i.e. where "package.json" lives. Default is '../..'
-    root = new File(projectRoot, "../..").canonicalFile
+    root = projectRoot
     //   The folder where the react-native NPM package is. Default is ../../node_modules/react-native
     // reactNativeDir = file("../../node_modules/react-native")
     //   The folder where the react-native Codegen package is. Default is ../../node_modules/@react-native/codegen

@@ -1,6 +1,7 @@
 import React from "react";
 import * as DocumentPicker from "expo-document-picker";
 import { StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { MobileObjectScene, type MobileObjectPoint } from "./src/MobileObjectScene";
 
 interface PlaybackStatus {
   consumedSamplePos: number;
@@ -10,7 +11,7 @@ interface PlaybackStatus {
   pendingBatches: number;
   paused: boolean;
 }
-interface ObjectPoint { id: number; samplePos: number; hasPos: boolean; pos: [number, number, number]; gainDb: number }
+interface ObjectPoint extends MobileObjectPoint { samplePos: number; hasPos: boolean }
 const ADM_AXES = "x 右 · y 前 · z 上";
 interface SdaEngineModule {
   playUri(uri: string, displayName: string, headYawDegrees: number): Promise<string>;
@@ -24,6 +25,7 @@ interface SdaEngineModule {
   feedError(): string | null;
   feedDone(): boolean;
   setVolume(volume: number): void;
+  hrtfStatus(): string;
 }
 interface State {
   busy: boolean;
@@ -36,6 +38,7 @@ interface State {
   decodedMs: number;
   fifoFrames: number;
   objects: ObjectPoint[];
+  hrtfStatus: string;
   headYaw: number;
   error: string | null;
 }
@@ -52,6 +55,7 @@ export default class App extends React.Component<Record<string, never>, State> {
     decodedMs: 0,
     fifoFrames: 0,
     objects: [],
+    hrtfStatus: "KU100 尚未加载",
     headYaw: 0,
     error: null,
   };
@@ -99,7 +103,8 @@ export default class App extends React.Component<Record<string, never>, State> {
     this.setState({ busy: true, error: null, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [] });
     try {
       const engine = this.getEngine();
-      if (!this.poller) this.poller = setInterval(() => this.pollStatus(), 250);
+      if (!this.poller) this.poller = setInterval(() => this.pollStatus(), 80);
+      this.setState({ hrtfStatus: engine.hrtfStatus() });
       await engine.playUri(this.state.selectedUri, this.state.fileName, this.state.headYaw);
       this.setState({ playing: true, ended: false, paused: false, error: null });
     } catch (error) {
@@ -183,19 +188,14 @@ export default class App extends React.Component<Record<string, never>, State> {
     return (
       <View style={styles.root}>
         <StatusBar barStyle="light-content" />
-        <Text style={styles.title}>SDA · 空间音频解码器</Text>
-        <View style={styles.room}>
-          {objects.map((object) => (
-            <View key={object.id} style={[styles.dot, { left: `${50 + object.pos[0] * 40}%`, top: `${50 - object.pos[1] * 40}%` }]} />
-          ))}
-          <View style={styles.listener} />
-        </View>
-        <Text style={styles.file}>{fileName || "选择 E-AC-3/JOC 音频"}</Text>
+        <Text style={styles.title}>SDA · 空间音频</Text>
+        <View style={styles.scene}><MobileObjectScene objects={objects} /></View>
+        <Text style={styles.file} numberOfLines={1}>{fileName || "选择 E-AC-3/JOC 音频"}</Text>
         <Text style={styles.status}>{emptyMessage} · {ADM_AXES}</Text>
         <Text style={styles.status}>
           {error ?? (playing
             ? `${paused ? "已暂停" : "播放中"} · ${formatTime(positionMs)} · 解码 ${formatTime(decodedMs)} · FIFO ${fifoFrames}`
-                        : ended ? "播放结束 · 可直接重放或调整试听朝向" : "首版支持裸 .eac3/.ec3 文件；MP4/MKV/MP3 暂不支持")}
+            : ended ? "播放结束 · 可直接重放或调整试听朝向" : "首版支持裸 .eac3/.ec3；MP4/MKV/MP3 暂不支持")}
         </Text>
         <View style={styles.controls}>
           <TouchableOpacity style={styles.primaryButton} onPress={this.chooseFile} disabled={busy}>
@@ -203,6 +203,12 @@ export default class App extends React.Component<Record<string, never>, State> {
           </TouchableOpacity>
           <TouchableOpacity style={styles.primaryButton} onPress={this.playSelected} disabled={busy || !selectedUri || playing}>
             <Text style={styles.buttonText}>{busy ? "正在启动…" : ended ? "重放" : "播放"}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={this.togglePause} disabled={!playing}>
+            <Text style={styles.buttonText}>{paused ? "继续" : "暂停"}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={this.stop} disabled={!playing}>
+            <Text style={styles.buttonText}>停止</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.iconButton} onPress={this.adjustYaw.bind(this, 15)}>
             <Text style={styles.buttonText}>朝左 15°</Text>
@@ -213,15 +219,10 @@ export default class App extends React.Component<Record<string, never>, State> {
           <TouchableOpacity style={styles.iconButton} onPress={this.resetYaw}>
             <Text style={styles.buttonText}>朝向复位 · {headYaw}°</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={this.togglePause} disabled={!playing}>
-            <Text style={styles.buttonText}>{paused ? "继续" : "暂停"}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={this.stop} disabled={!playing}>
-            <Text style={styles.buttonText}>停止</Text>
-          </TouchableOpacity>
         </View>
       </View>
     );
+
   }
 }
 
@@ -231,15 +232,13 @@ function formatTime(ms: number): string {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0c101c", alignItems: "center", paddingTop: 48 },
+  root: { flex: 1, backgroundColor: "#0c101c", alignItems: "center", paddingTop: 42, paddingHorizontal: 16 },
   title: { color: "#dbe2f0", fontSize: 18, fontWeight: "600" },
-  room: { width: "86%", aspectRatio: 1.2, marginTop: 18, backgroundColor: "#111726", borderRadius: 8, overflow: "hidden" },
-  dot: { position: "absolute", width: 18, height: 18, borderRadius: 9, marginLeft: -9, marginTop: -9, backgroundColor: "#35d7cf" },
-  listener: { position: "absolute", left: "50%", top: "50%", width: 10, height: 10, borderRadius: 5, marginLeft: -5, marginTop: -5, backgroundColor: "#e8b34b" },
-  file: { color: "#dbe2f0", fontSize: 14, marginTop: 18, maxWidth: "88%" },
-  status: { color: "#8fa0bd", fontSize: 12, marginTop: 10, paddingHorizontal: 20, textAlign: "center" },
-  controls: { flexDirection: "row", alignItems: "center", justifyContent: "center", flexWrap: "wrap", marginTop: 20, gap: 10 },
-  primaryButton: { backgroundColor: "#2a5bd7", paddingHorizontal: 22, paddingVertical: 13, borderRadius: 8 },
-  iconButton: { backgroundColor: "#293244", paddingHorizontal: 16, paddingVertical: 13, borderRadius: 8 },
+  scene: { width: "100%", flex: 1, minHeight: 260, marginTop: 14, backgroundColor: "#111726", borderRadius: 8, overflow: "hidden" },
+  file: { color: "#dbe2f0", fontSize: 14, marginTop: 12, maxWidth: "95%" },
+  status: { color: "#8fa0bd", fontSize: 12, marginTop: 8, paddingHorizontal: 8, textAlign: "center" },
+  controls: { flexDirection: "row", alignItems: "center", justifyContent: "center", flexWrap: "wrap", marginTop: 14, marginBottom: 16, gap: 8 },
+  primaryButton: { backgroundColor: "#2a5bd7", minHeight: 46, justifyContent: "center", paddingHorizontal: 20, paddingVertical: 12, borderRadius: 8 },
+  iconButton: { backgroundColor: "#293244", minHeight: 46, justifyContent: "center", paddingHorizontal: 14, paddingVertical: 12, borderRadius: 8 },
   buttonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
 });

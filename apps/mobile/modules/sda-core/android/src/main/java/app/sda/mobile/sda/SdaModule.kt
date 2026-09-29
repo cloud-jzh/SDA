@@ -7,6 +7,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.InputStream
 import java.util.Locale
+import java.security.MessageDigest
 
 /** Android Expo bridge. Supports raw E-AC-3/JOC elementary streams only. */
 class SdaModule : Module() {
@@ -21,29 +22,59 @@ class SdaModule : Module() {
     @Volatile
     private var feedDone = false
     @Volatile
+    private var hrtfLoadStatus = "未加载"
+    @Volatile
     private var activeInput: InputStream? = null
     @Volatile
     private var generation = 0L
     private val nativeLock = Object()
     private val lifecycleLock = Object()
 
+    private fun sha256(file: java.io.File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
     private fun ensureEngine(): Long = synchronized(nativeLock) {
         if (handle != 0L) return@synchronized handle
         val context = appContext?.reactContext ?: throw RuntimeException("no react context")
         val hrtfDir = java.io.File(context.filesDir, "hrtf")
-        hrtfDir.mkdirs()
-        context.assets.list("hrtf")?.forEach { name ->
-            context.assets.open("hrtf/$name").use { input ->
-                java.io.File(hrtfDir, name).outputStream().use { output -> input.copyTo(output) }
-            }
+        check(hrtfDir.mkdirs() || hrtfDir.isDirectory) { "Cannot create KU100 asset directory: $hrtfDir" }
+        val names = context.assets.list("hrtf")?.toList().orEmpty()
+        val manifestName = "hrtf-set.json"
+        check(manifestName in names && names.any { it.endsWith("_dry.f32") } && names.any { it.endsWith("_wet.f32") }) {
+            "Packaged KU100 HRTF asset set is incomplete"
         }
+        names.forEach { name ->
+            val packaged = context.assets.open("hrtf/$name").use { it.readBytes() }
+            val destination = java.io.File(hrtfDir, name)
+            val matches = if (name.endsWith(".f32")) {
+                val expected = MessageDigest.getInstance("SHA-256").digest(packaged)
+                    .joinToString("") { "%02x".format(it) }
+                destination.isFile && destination.length() == packaged.size.toLong() && sha256(destination) == expected
+            } else destination.isFile && destination.length() == packaged.size.toLong() &&
+                destination.readBytes().contentEquals(packaged)
+            if (!matches) destination.writeBytes(packaged)
+        }
+        check(java.io.File(hrtfDir, manifestName).isFile) { "KU100 hrtf-set.json was not copied" }
+        hrtfLoadStatus = "KU100 资源已就绪，正在加载"
         val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
-        val ptr = SdaEngine.nativeInit(config, java.io.File(hrtfDir, "hrtf-set.json").absolutePath)
+        val ptr = SdaEngine.nativeInit(config, java.io.File(hrtfDir, manifestName).absolutePath)
         if (ptr == 0L) {
             val detail = SdaEngine.nativeInitError()
-            throw RuntimeException(if (detail.isBlank()) "nativeInit failed" else detail)
+            hrtfLoadStatus = "KU100 加载失败: ${if (detail.isBlank()) "nativeInit failed" else detail}"
+            throw RuntimeException(hrtfLoadStatus)
         }
         handle = ptr
+        hrtfLoadStatus = "已加载 KU100 D1 (Apache-2.0)"
         val result = SdaEngine.nativeStart(ptr)
         if (result != 0) {
             SdaEngine.nativeClose(ptr)
@@ -249,6 +280,8 @@ class SdaModule : Module() {
                 check(handle != 0L && SdaEngine.nativeResetHeadPose(handle) == 0) { "Native head pose reset failed" }
             }
         }
+
+        Function("hrtfStatus") { -> hrtfLoadStatus }
 
         Function("feedError") { -> feedError }
 
