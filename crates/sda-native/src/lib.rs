@@ -97,6 +97,22 @@ pub struct PlaybackStatus {
 /// and receives at most one position per object per poll.
 pub type ObjectSnapshot = HashMap<u32, ObjectEvent>;
 
+fn snapshot_at_clock(
+    events: &mut VecDeque<ObjectEvent>,
+    active: &mut ObjectSnapshot,
+    clock: u64,
+) -> ObjectSnapshot {
+    while events.front().is_some_and(|event| event.sample_pos <= clock) {
+        let event = events.pop_front().expect("front checked");
+        if event.has_pos {
+            active.insert(event.id, event);
+        } else {
+            active.remove(&event.id);
+        }
+    }
+    active.clone()
+}
+
 /// Errors surfaced across the FFI boundary as plain strings.
 pub type EngineResult<T> = Result<T, String>;
 
@@ -121,10 +137,14 @@ pub struct MobileEngine {
     newest_sample_pos: Mutex<u64>,
     /// 66 ms coalescing window for `poll_object_snapshot` (plan T1.10).
     last_poll: Mutex<Option<Instant>>,
+    /// Decoded object metadata retained until the presentation clock reaches it.
+    object_events: Mutex<VecDeque<ObjectEvent>>,
+    active_objects: Mutex<HashMap<u32, ObjectEvent>>,
 }
 
 /// Object-event throttle window; mirrors the web player's 66 ms batching.
 pub const OBJECT_POLL_INTERVAL: Duration = Duration::from_millis(66);
+pub const OBJECT_EVENT_CAPACITY: usize = 65_536;
 
 impl MobileEngine {
     /// Create the engine. `hrtf_dir` is reserved for T1.12 (HRTF asset
@@ -145,6 +165,8 @@ impl MobileEngine {
             declared_sources: Mutex::new(Vec::new()),
             newest_sample_pos: Mutex::new(0),
             last_poll: Mutex::new(None),
+            object_events: Mutex::new(VecDeque::new()),
+            active_objects: Mutex::new(HashMap::new()),
         })
     }
 
@@ -224,6 +246,16 @@ impl MobileEngine {
             let mut pending = self.pending.lock().expect("pending lock");
             while let Some(frame) = self.decoder.next_frame() {
                 sample_pos = frame.sample_pos + frame.channels.first().map_or(0, |pcm| pcm.len()) as u64;
+                {
+                    let mut timeline = self.object_events.lock().expect("object events lock");
+                    let available = OBJECT_EVENT_CAPACITY.saturating_sub(timeline.len());
+                    if frame.events.len() > available {
+                        return Err(format!(
+                            "object metadata timeline full (capacity {OBJECT_EVENT_CAPACITY}); feed was rejected before enqueuing this frame"
+                        ));
+                    }
+                    timeline.extend(frame.events.iter().cloned());
+                }
                 pending.push_back(frame);
                 frames_pushed += 1;
             }
@@ -282,6 +314,8 @@ impl MobileEngine {
         self.pending.lock().expect("pending lock").clear();
         *self.newest_sample_pos.lock().expect("clock lock") = 0;
         *self.last_poll.lock().expect("poll lock") = None;
+        self.object_events.lock().expect("object events lock").clear();
+        self.active_objects.lock().expect("active objects lock").clear();
         self.declared_sources.lock().expect("sources lock").clear();
         if let Some(pipeline) = &self.pipeline {
             // Invalidate the rendered FIFO: epoch flush consumed by the
@@ -311,6 +345,9 @@ impl MobileEngine {
             let _ = pipeline.commands.push(render_command::RenderCommand::Command(Command::Shutdown));
         }
         self.pending.lock().expect("pending lock").clear();
+        self.object_events.lock().expect("object events lock").clear();
+        self.active_objects.lock().expect("active objects lock").clear();
+        *self.last_poll.lock().expect("poll lock") = None;
     }
 
     pub fn set_paused(&mut self, paused: bool) -> EngineResult<()> {
@@ -324,10 +361,20 @@ impl MobileEngine {
         Ok(())
     }
 
+    /// Latest valid object positions at the audio presentation clock. Events
+    /// decoded ahead of playback are retained but never exposed early.
+    pub fn object_snapshot(&self) -> ObjectSnapshot {
+        let clock = self.playback_status().consumed_sample_pos;
+        snapshot_at_clock(
+            &mut self.object_events.lock().expect("object events lock"),
+            &mut self.active_objects.lock().expect("active objects lock"),
+            clock,
+        )
+    }
+
     /// Latest object positions, coalesced to at most one snapshot per
-    /// [`OBJECT_POLL_INTERVAL`] (plan T1.10). Between windows it returns the
-    /// previous snapshot semantics as `None` — hosts simply skip the frame.
-    pub fn poll_object_snapshot(&self, pending_frames: &[FrameData]) -> Option<ObjectSnapshot> {
+    /// [`OBJECT_POLL_INTERVAL`].
+    pub fn poll_object_snapshot(&self, _pending_frames: &[FrameData]) -> Option<ObjectSnapshot> {
         let mut last = self.last_poll.lock().expect("poll lock");
         if let Some(previous) = last.as_ref() {
             if previous.elapsed() < OBJECT_POLL_INTERVAL {
@@ -335,13 +382,25 @@ impl MobileEngine {
             }
         }
         *last = Some(Instant::now());
-        let mut snapshot = ObjectSnapshot::new();
-        for frame in pending_frames {
-            for event in &frame.events {
-                snapshot.insert(event.id, event.clone());
-            }
+        Some(self.object_snapshot())
+    }
+
+    pub fn set_head_yaw_degrees(&self, degrees: f32) -> EngineResult<()> {
+        if !degrees.is_finite() || !(-180.0..=180.0).contains(&degrees) {
+            return Err("head yaw must be finite and between -180 and 180 degrees".into());
         }
-        Some(snapshot)
+        let pipeline = self.pipeline.as_ref().ok_or("engine not started")?;
+        let half = degrees.to_radians() * 0.5;
+        let orientation = [0.0, 0.0, half.sin(), half.cos()];
+        pipeline.commands.push(render_command::RenderCommand::Command(
+            Command::HeadPose { orientation },
+        )).map_err(|_| "command queue full".into())
+    }
+
+    pub fn reset_head_pose(&self) -> EngineResult<()> {
+        let pipeline = self.pipeline.as_ref().ok_or("engine not started")?;
+        pipeline.commands.push(render_command::RenderCommand::Command(Command::ClearHeadPose))
+            .map_err(|_| "command queue full".into())
     }
 
         /// Start with the platform output: AAudio blocking-write sink (T2.2).
@@ -753,14 +812,92 @@ mod tests {
 
     /// T1.10: object snapshots coalesce to one per 66 ms window.
     #[test]
-    fn object_snapshot_throttles_to_66ms() {
+    fn object_snapshot_waits_for_presentation_clock_and_evicts_consumed_events() {
+        let object = ObjectEvent {
+            id: 7,
+            sample_pos: 480,
+            has_pos: true,
+            pos: [1.0, 0.0, 0.0],
+            gain_db: 0.0,
+            size: [0.0; 3],
+            anchor: "room".into(),
+            distance_m: None,
+            distance_infinite: false,
+            screen_factor: None,
+            depth_factor: None,
+            ramp_duration: 0,
+        };
+        let mut events = VecDeque::from([object.clone()]);
+        let mut active = ObjectSnapshot::new();
+        assert!(snapshot_at_clock(&mut events, &mut active, 479).is_empty());
+        assert_eq!(events.len(), 1);
+        let snapshot = snapshot_at_clock(&mut events, &mut active, 480);
+        assert_eq!(snapshot.get(&7).map(|value| value.pos), Some(object.pos));
+        assert!(events.is_empty(), "consumed events are evicted from the timeline");
+
+        let inactive = ObjectEvent { has_pos: false, sample_pos: 960, ..object };
+        events.push_back(inactive);
+        assert_eq!(snapshot_at_clock(&mut events, &mut active, 960).len(), 0,
+            "hasPos=false removes the active object on its effective presentation frame");
+    }
+
+    #[test]
+    fn object_snapshot_capacity_rejects_instead_of_dropping_future_events() {
+        let event = ObjectEvent {
+            id: 1, sample_pos: 1, has_pos: true, pos: [0.0; 3], gain_db: 0.0,
+            size: [0.0; 3], anchor: "room".into(), distance_m: None,
+            distance_infinite: false, screen_factor: None, depth_factor: None, ramp_duration: 0,
+        };
+        let mut timeline = VecDeque::from(vec![event; OBJECT_EVENT_CAPACITY]);
+        let available = OBJECT_EVENT_CAPACITY.saturating_sub(timeline.len());
+        assert_eq!(available, 0, "full timeline has no capacity for another event");
+        assert_eq!(timeline.len(), OBJECT_EVENT_CAPACITY, "no future event was silently evicted");
+    }
+
+    #[test]
+    fn head_yaw_rejects_non_finite_and_out_of_range_values() {
+        let engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        assert!(engine.set_head_yaw_degrees(f32::NAN).is_err());
+        assert!(engine.set_head_yaw_degrees(181.0).is_err());
+        assert!(engine.set_head_yaw_degrees(-181.0).is_err());
+    }
+
+    #[test]
+    fn joc_fixture_exposes_object_channels_and_position_events() {
         let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
         engine.feed(&joc_fixture()).unwrap();
         let frames = engine.take_pending_frames();
-        let first = engine.poll_object_snapshot(&frames).unwrap();
-        assert!(!first.is_empty(), "JOC fixture carries object events");
+        assert!(frames.iter().any(|frame| frame.labels.iter().any(|label| label.starts_with("Obj_"))),
+            "fixture must decode object PCM channels");
+        assert!(frames.iter().any(|frame| !frame.object_channels.is_empty()),
+            "fixture must declare the object-to-channel mapping");
+        assert!(frames.iter().any(|frame| frame.events.iter().any(|event| event.has_pos)),
+            "raw decoded fixture frames must include positioned events");
+    }
+
+    #[test]
+    fn object_snapshot_waits_for_presentation_clock_and_throttles() {
+        let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        engine.feed(&joc_fixture()).unwrap();
+        let frames = engine.take_pending_frames();
+        let latest = frames.iter().flat_map(|frame| frame.events.iter()).filter(|event| event.has_pos)
+            .max_by_key(|event| event.sample_pos).expect("fixture has positioned raw events").clone();
+        let timeline_len = engine.object_events.lock().unwrap().len();
+        engine.pipeline = Some(RenderPipeline {
+            fifo: Arc::new(stereo_fifo::StereoFifo::new(sda_native_renderer::STEREO_FIFO_CAPACITY_FRAMES)),
+            commands: Arc::new(render_command::RenderCommandQueue::new(256)),
+            telemetry: Arc::new(RuntimeTelemetry::default()),
+        });
+        let first = engine.poll_object_snapshot(&frames).expect("first poll is allowed");
+        assert!(first.is_empty(), "future fixture events must be hidden at clock 0");
+        engine.pipeline.as_ref().unwrap().telemetry.callback_consumed_sample_pos
+            .store(latest.sample_pos, std::sync::atomic::Ordering::Release);
+        std::thread::sleep(OBJECT_POLL_INTERVAL + Duration::from_millis(2));
+        let consumed_clock = engine.playback_status().consumed_sample_pos;
+        let snapshot = engine.poll_object_snapshot(&frames).expect("poll window elapsed");
+        assert_eq!(snapshot.get(&latest.id).map(|event| event.pos), Some(latest.pos),
+            "raw positioned event should be presented: timeline={timeline_len}, consumed={consumed_clock}, latest={}",
+            latest.sample_pos);
         assert!(engine.poll_object_snapshot(&frames).is_none(), "inside throttle window");
-        std::thread::sleep(OBJECT_POLL_INTERVAL);
-        assert!(engine.poll_object_snapshot(&frames).is_some(), "window elapsed");
     }
 }

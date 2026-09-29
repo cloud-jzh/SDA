@@ -10,12 +10,17 @@ interface PlaybackStatus {
   pendingBatches: number;
   paused: boolean;
 }
+interface ObjectPoint { id: number; samplePos: number; hasPos: boolean; pos: [number, number, number]; gainDb: number }
+const ADM_AXES = "x 右 · y 前 · z 上";
 interface SdaEngineModule {
-  playUri(uri: string, displayName: string): Promise<string>;
+  playUri(uri: string, displayName: string, headYawDegrees: number): Promise<string>;
   pause(): boolean;
   resume(): boolean;
   stop(): boolean;
   status(): string;
+  objects(): string;
+  setHeadYaw(degrees: number): void;
+  resetHeadPose(): void;
   feedError(): string | null;
   feedDone(): boolean;
   setVolume(volume: number): void;
@@ -23,11 +28,15 @@ interface SdaEngineModule {
 interface State {
   busy: boolean;
   playing: boolean;
+  ended: boolean;
   paused: boolean;
+  selectedUri: string;
   fileName: string;
   positionMs: number;
   decodedMs: number;
   fifoFrames: number;
+  objects: ObjectPoint[];
+  headYaw: number;
   error: string | null;
 }
 
@@ -35,11 +44,15 @@ export default class App extends React.Component<Record<string, never>, State> {
   state: State = {
     busy: false,
     playing: false,
+    ended: false,
     paused: false,
+    selectedUri: "",
     fileName: "",
     positionMs: 0,
     decodedMs: 0,
     fifoFrames: 0,
+    objects: [],
+    headYaw: 0,
     error: null,
   };
   private engine?: SdaEngineModule;
@@ -62,7 +75,7 @@ export default class App extends React.Component<Record<string, never>, State> {
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: "application/octet-stream",
-        copyToCacheDirectory: false,
+        copyToCacheDirectory: true,
         multiple: false,
       });
       if (result.canceled) return;
@@ -72,14 +85,25 @@ export default class App extends React.Component<Record<string, never>, State> {
       if (extension !== "eac3" && extension !== "ec3") {
         throw new Error("首版仅支持裸 .eac3/.ec3 音频流；MP4、MKV 和 MP3 暂不支持");
       }
-      const engine = this.getEngine();
-      if (!this.poller) {
-        this.poller = setInterval(() => this.pollStatus(), 250);
-      }
-      await engine.playUri(asset.uri, asset.name);
-      this.setState({ fileName: asset.name, playing: true, paused: false, error: null });
+      if (this.state.playing) this.engine?.stop();
+      this.setState({ selectedUri: asset.uri, fileName: asset.name, playing: false, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [], error: null });
     } catch (error) {
       this.setState({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.setState({ busy: false });
+    }
+  };
+
+  private playSelected = async () => {
+    if (this.state.busy || !this.state.selectedUri) return;
+    this.setState({ busy: true, error: null, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [] });
+    try {
+      const engine = this.getEngine();
+      if (!this.poller) this.poller = setInterval(() => this.pollStatus(), 250);
+      await engine.playUri(this.state.selectedUri, this.state.fileName, this.state.headYaw);
+      this.setState({ playing: true, ended: false, paused: false, error: null });
+    } catch (error) {
+      this.setState({ playing: false, error: error instanceof Error ? error.message : String(error) });
     } finally {
       this.setState({ busy: false });
     }
@@ -88,16 +112,19 @@ export default class App extends React.Component<Record<string, never>, State> {
   private pollStatus() {
     try {
       const engine = this.engine;
-      if (!engine) return;
+      if (!engine || (!this.state.playing && !this.state.busy)) return;
       const value = JSON.parse(engine.status()) as Partial<PlaybackStatus>;
       const feedError = engine.feedError();
       const feedDone = engine.feedDone();
+      const objects = JSON.parse(engine.objects()) as Record<string, ObjectPoint>;
       this.setState({
         positionMs: value.positionMs ?? 0,
         decodedMs: ((value.decodedSamplePos ?? 0) * 1000) / 48000,
         fifoFrames: value.fifoFrames ?? 0,
+        objects: feedDone ? [] : Object.values(objects).filter((object) => object.hasPos && object.pos.every(Number.isFinite)),
         paused: value.paused ?? this.state.paused,
         playing: feedDone ? false : this.state.playing,
+        ended: feedDone,
         error: feedError ?? this.state.error,
       });
     } catch (error) {
@@ -116,53 +143,82 @@ export default class App extends React.Component<Record<string, never>, State> {
     }
   };
 
+  private adjustYaw = (delta: number) => {
+    try {
+      const headYaw = Math.max(-180, Math.min(180, this.state.headYaw + delta));
+      if (this.state.playing && !this.state.ended) this.getEngine().setHeadYaw(headYaw);
+      this.setState({ headYaw });
+    } catch (error) {
+      this.setState({ error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  private resetYaw = () => {
+    try {
+      if (this.state.playing && !this.state.ended) this.getEngine().resetHeadPose();
+      this.setState({ headYaw: 0 });
+    } catch (error) {
+      this.setState({ error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
   private stop = () => {
     try {
       this.engine?.stop();
-      this.setState({ playing: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0 });
+      this.setState({ playing: false, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [] });
     } catch (error) {
       this.setState({ error: error instanceof Error ? error.message : String(error) });
     }
   };
 
   render() {
-    const { busy, playing, paused, fileName, positionMs, decodedMs, fifoFrames, error } = this.state;
-    const objects = playing
-      ? [
-          { id: 10, x: Math.sin((positionMs / 1000) * 2), z: 0.2 },
-          { id: 11, x: Math.sin((positionMs / 1000) * 1.4 + 2), z: -0.3 },
-        ]
-      : [];
+    const { busy, playing, ended, paused, selectedUri, fileName, positionMs, decodedMs, fifoFrames, objects, headYaw, error } = this.state;
+    const emptyMessage = ended
+      ? "已到文件末尾 · 对象位置已清空"
+      : !playing
+        ? selectedUri ? "文件已就绪 · 可调整朝向后播放" : "选择 E-AC-3/JOC 音频后查看对象位置"
+        : objects.length === 0
+          ? "当前播放位置没有有效对象坐标"
+          : `${objects.length} 个对象 · 消费时钟 ${formatTime(positionMs)}`;
     return (
       <View style={styles.root}>
         <StatusBar barStyle="light-content" />
         <Text style={styles.title}>SDA · 空间音频解码器</Text>
         <View style={styles.room}>
           {objects.map((object) => (
-            <View key={object.id} style={[styles.dot, { left: `${50 + object.x * 40}%`, top: `${50 - object.z * 40}%` }]} />
+            <View key={object.id} style={[styles.dot, { left: `${50 + object.pos[0] * 40}%`, top: `${50 - object.pos[1] * 40}%` }]} />
           ))}
           <View style={styles.listener} />
         </View>
         <Text style={styles.file}>{fileName || "选择 E-AC-3/JOC 音频"}</Text>
+        <Text style={styles.status}>{emptyMessage} · {ADM_AXES}</Text>
         <Text style={styles.status}>
           {error ?? (playing
             ? `${paused ? "已暂停" : "播放中"} · ${formatTime(positionMs)} · 解码 ${formatTime(decodedMs)} · FIFO ${fifoFrames}`
-            : "首版支持裸 .eac3/.ec3 文件；MP4/MKV/MP3 暂不支持")}
+                        : ended ? "播放结束 · 可直接重放或调整试听朝向" : "首版支持裸 .eac3/.ec3 文件；MP4/MKV/MP3 暂不支持")}
         </Text>
         <View style={styles.controls}>
           <TouchableOpacity style={styles.primaryButton} onPress={this.chooseFile} disabled={busy}>
-            <Text style={styles.buttonText}>{busy ? "正在打开…" : playing ? "打开其他文件" : "选择文件"}</Text>
+            <Text style={styles.buttonText}>{busy ? "正在处理…" : "选择文件"}</Text>
           </TouchableOpacity>
-          {playing && (
-            <>
-              <TouchableOpacity style={styles.iconButton} onPress={this.togglePause}>
-                <Text style={styles.buttonText}>{paused ? "继续" : "暂停"}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.iconButton} onPress={this.stop}>
-                <Text style={styles.buttonText}>停止</Text>
-              </TouchableOpacity>
-            </>
-          )}
+          <TouchableOpacity style={styles.primaryButton} onPress={this.playSelected} disabled={busy || !selectedUri || playing}>
+            <Text style={styles.buttonText}>{busy ? "正在启动…" : ended ? "重放" : "播放"}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={this.adjustYaw.bind(this, 15)}>
+            <Text style={styles.buttonText}>朝左 15°</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={this.adjustYaw.bind(this, -15)}>
+            <Text style={styles.buttonText}>朝右 15°</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={this.resetYaw}>
+            <Text style={styles.buttonText}>朝向复位 · {headYaw}°</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={this.togglePause} disabled={!playing}>
+            <Text style={styles.buttonText}>{paused ? "继续" : "暂停"}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={this.stop} disabled={!playing}>
+            <Text style={styles.buttonText}>停止</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );

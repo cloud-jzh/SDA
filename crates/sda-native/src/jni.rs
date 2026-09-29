@@ -59,12 +59,75 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeInit(
             if !hrtf.is_empty() {
                 if let Err(error) = engine.load_hrtf(&hrtf) {
                     android_log(&format!("hrtf load failed: {error}"));
+                    set_init_error(&error);
                     return 0;
                 }
             }
+            set_init_error("");
             Box::into_raw(Box::new(engine)) as jlong
         }
-        Err(_) => 0,
+        Err(error) => {
+            set_init_error(&error);
+            0
+        }
+    }
+}
+
+fn init_error() -> &'static std::sync::Mutex<String> {
+    static ERROR: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    ERROR.get_or_init(|| std::sync::Mutex::new(String::new()))
+}
+
+fn set_init_error(message: &str) {
+    *init_error().lock().unwrap() = message.to_string();
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeInitError(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jstring {
+    let message = init_error().lock().unwrap().clone();
+    env.new_string(message).map(|value| value.into_raw()).unwrap_or_else(|_| std::ptr::null_mut())
+}
+
+/// `nativeObjects(ptr: Long): String` — presentation-clock object metadata.
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeObjects(
+    mut env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jni::sys::jstring {
+    let json = take_engine(ptr)
+        .and_then(|engine| serde_json::to_string(&engine.object_snapshot()).ok())
+        .unwrap_or_else(|| "{}".to_string());
+    env.new_string(json).map(|value| value.into_raw()).unwrap_or_else(|_| std::ptr::null_mut())
+}
+
+/// `nativeSetHeadYaw(ptr: Long, degrees: Float): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeSetHeadYaw(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    degrees: jni::sys::jfloat,
+) -> jint {
+    match take_engine(ptr) {
+        Some(engine) => engine.set_head_yaw_degrees(degrees).map(|_| 0).unwrap_or(-1),
+        None => -2,
+    }
+}
+
+/// `nativeResetHeadPose(ptr: Long): Int`
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeResetHeadPose(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jint {
+    match take_engine(ptr) {
+        Some(engine) => engine.reset_head_pose().map(|_| 0).unwrap_or(-1),
+        None => -2,
     }
 }
 

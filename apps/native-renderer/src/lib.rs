@@ -5177,6 +5177,63 @@ mod tests {
     }
 
     #[test]
+    fn front_object_stereo_output_changes_with_head_yaw_through_calibrated_bus_hrtf() {
+        let render = |yaw_degrees: f32| {
+            let mut engine = calibrated_engine();
+            engine.paused = false;
+            engine.set_program_codec("eac3".into());
+            let half = yaw_degrees.to_radians() * 0.5;
+            let pose = [0.0, 0.0, half.sin(), half.cos()];
+            engine.head_pose = Some(pose);
+            engine.pose_route_base = Some(pose);
+            let samples: Vec<f32> = (0..8192)
+                .map(|i| {
+                    let t = i as f32;
+                    ((t * 0.071).sin() + 0.37 * (t * 0.193).sin()) * 0.01
+                })
+                .collect();
+            let mut source = Source {
+                kind: SourceKind::Object,
+                object_id: Some(73),
+                position: [0.0, 1.0, 0.0],
+                gain: 1.0,
+                target_gain: 1.0,
+                availability: 1.0,
+                availability_target: 1.0,
+                ..Source::default()
+            };
+            source.samples.write(0, 0, &samples);
+            engine.sources.insert("obj:73".into(), source);
+            engine.route_source_now("obj:73", 0).unwrap();
+            assert!(engine.sources["obj:73"].direct.is_none());
+            assert!(engine.sources["obj:73"].continuous.is_none());
+            let mut output = vec![0.0; samples.len() * 2];
+            engine.render_into(&mut output, 2);
+            assert!(output.iter().any(|sample| sample.abs() > 1e-6));
+            output
+        };
+
+        let front = render(0.0);
+        let facing_left = render(90.0);
+        let facing_back = render(180.0);
+        let difference = |a: &[f32], b: &[f32]| {
+            a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>()
+        };
+        assert!(difference(&front, &facing_left) > 1e-5,
+            "a 90-degree listener yaw must change rendered stereo samples");
+        assert!(difference(&front, &facing_back) > 1e-5,
+            "a 180-degree listener yaw must change rendered stereo samples");
+        let left_right_bias = |audio: &[f32]| {
+            let (left, right) = audio.chunks_exact(2).fold((0.0, 0.0), |(l, r), frame| {
+                (l + frame[0] * frame[0], r + frame[1] * frame[1])
+            });
+            (left - right) / (left + right).max(1e-12)
+        };
+        assert!((left_right_bias(&front) - left_right_bias(&facing_left)).abs() > 0.01,
+            "head yaw must alter the two-ear energy balance via the shared HRTF buses");
+    }
+
+    #[test]
     fn overhead_bed_output_matches_measured_direction_impulse() {
         let count = 12288;
         let impulse_at = 2048;
