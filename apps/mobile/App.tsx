@@ -26,6 +26,7 @@ interface SdaEngineModule {
   feedDone(): boolean;
   setVolume(volume: number): void;
   hrtfStatus(): string;
+  stereoBedMode(): boolean;
 }
 interface State {
   busy: boolean;
@@ -78,7 +79,7 @@ export default class App extends React.Component<Record<string, never>, State> {
     this.setState({ busy: true, error: null });
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: "application/octet-stream",
+        type: "*/*",
         copyToCacheDirectory: true,
         multiple: false,
       });
@@ -86,8 +87,8 @@ export default class App extends React.Component<Record<string, never>, State> {
       const asset = result.assets[0];
       if (!asset) throw new Error("文件选择未返回媒体条目");
       const extension = asset.name.split(".").pop()?.toLowerCase();
-      if (extension !== "eac3" && extension !== "ec3") {
-        throw new Error("首版仅支持裸 .eac3/.ec3 音频流；MP4、MKV 和 MP3 暂不支持");
+      if (extension !== "eac3" && extension !== "ec3" && extension !== "mp3") {
+        throw new Error("支持裸 .eac3/.ec3 和普通立体声 .mp3 文件");
       }
       if (this.state.playing) this.engine?.stop();
       this.setState({ selectedUri: asset.uri, fileName: asset.name, playing: false, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [], error: null });
@@ -129,7 +130,8 @@ export default class App extends React.Component<Record<string, never>, State> {
         objects: feedDone ? [] : Object.values(objects).filter((object) => object.hasPos && object.pos.every(Number.isFinite)),
         paused: value.paused ?? this.state.paused,
         playing: feedDone ? false : this.state.playing,
-        ended: feedDone,
+        ended: feedDone && !feedError,
+        hrtfStatus: engine.hrtfStatus(),
         error: feedError ?? this.state.error,
       });
     } catch (error) {
@@ -177,14 +179,17 @@ export default class App extends React.Component<Record<string, never>, State> {
   };
 
   render() {
-    const { busy, playing, ended, paused, selectedUri, fileName, positionMs, decodedMs, fifoFrames, objects, headYaw, error } = this.state;
-    const emptyMessage = ended
-      ? "已到文件末尾 · 对象位置已清空"
-      : !playing
-        ? selectedUri ? "文件已就绪 · 可调整朝向后播放" : "选择 E-AC-3/JOC 音频后查看对象位置"
-        : objects.length === 0
-          ? "当前播放位置没有有效对象坐标"
-          : `${objects.length} 个对象 · 消费时钟 ${formatTime(positionMs)}`;
+    const { busy, playing, ended, paused, selectedUri, fileName, positionMs, decodedMs, fifoFrames, objects, headYaw, error, hrtfStatus } = this.state;
+    const isMp3 = fileName.toLowerCase().endsWith(".mp3");
+    const emptyMessage = isMp3
+      ? "MP3 普通立体声床声 · 不含 Atmos 对象"
+      : ended
+        ? "已到文件末尾 · 对象位置已清空"
+        : !playing
+          ? selectedUri ? "文件已就绪 · 可调整朝向后播放" : "选择 E-AC-3/JOC 音频后查看对象位置"
+          : objects.length === 0
+            ? "当前播放位置没有有效对象坐标"
+            : `${objects.length} 个对象 · 消费时钟 ${formatTime(positionMs)}`;
     return (
       <View style={styles.root}>
         <StatusBar barStyle="light-content" />
@@ -192,10 +197,11 @@ export default class App extends React.Component<Record<string, never>, State> {
         <View style={styles.scene}><MobileObjectScene objects={objects} /></View>
         <Text style={styles.file} numberOfLines={1}>{fileName || "选择 E-AC-3/JOC 音频"}</Text>
         <Text style={styles.status}>{emptyMessage} · {ADM_AXES}</Text>
+        <Text style={styles.status}>{hrtfStatus}</Text>
         <Text style={styles.status}>
           {error ?? (playing
             ? `${paused ? "已暂停" : "播放中"} · ${formatTime(positionMs)} · 解码 ${formatTime(decodedMs)} · FIFO ${fifoFrames}`
-            : ended ? "播放结束 · 可直接重放或调整试听朝向" : "首版支持裸 .eac3/.ec3；MP4/MKV/MP3 暂不支持")}
+            : ended ? "播放结束 · 可直接重放或调整试听朝向" : "支持裸 E-AC-3/JOC 与 MP3 立体声床声")}
         </Text>
         <View style={styles.controls}>
           <TouchableOpacity style={styles.primaryButton} onPress={this.chooseFile} disabled={busy}>

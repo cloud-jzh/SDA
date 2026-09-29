@@ -5,32 +5,27 @@ import com.sda.nativebridge.SdaEngine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
+import java.io.File
 import java.io.InputStream
-import java.util.Locale
 import java.security.MessageDigest
+import java.util.Locale
 
-/** Android Expo bridge. Supports raw E-AC-3/JOC elementary streams only. */
+/** Android host for the shared Rust decoder, renderer, and AAudio transport. */
 class SdaModule : Module() {
-    private var handle: Long = 0L
+    private var handle = 0L
     private var feedThread: Thread? = null
-    @Volatile
-    private var stopped = false
-    @Volatile
-    private var feedError: String? = null
-    @Volatile
-    private var paused = false
-    @Volatile
-    private var feedDone = false
-    @Volatile
-    private var hrtfLoadStatus = "未加载"
-    @Volatile
-    private var activeInput: InputStream? = null
-    @Volatile
-    private var generation = 0L
+    @Volatile private var stopped = false
+    @Volatile private var feedError: String? = null
+    @Volatile private var paused = false
+    @Volatile private var feedDone = false
+    @Volatile private var hrtfLoadStatus = "KU100 尚未加载"
+    @Volatile private var activeInput: InputStream? = null
+    @Volatile private var generation = 0L
+    @Volatile private var activeIsMp3 = false
     private val nativeLock = Object()
     private val lifecycleLock = Object()
 
-    private fun sha256(file: java.io.File): String {
+    private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buffer = ByteArray(16 * 1024)
@@ -45,58 +40,57 @@ class SdaModule : Module() {
 
     private fun ensureEngine(): Long = synchronized(nativeLock) {
         if (handle != 0L) return@synchronized handle
-        val context = appContext?.reactContext ?: throw RuntimeException("no react context")
-        val hrtfDir = java.io.File(context.filesDir, "hrtf")
-        check(hrtfDir.mkdirs() || hrtfDir.isDirectory) { "Cannot create KU100 asset directory: $hrtfDir" }
+        val context = appContext?.reactContext ?: error("no react context")
+        val hrtfDir = File(context.filesDir, "hrtf")
+        check(hrtfDir.mkdirs() || hrtfDir.isDirectory) { "Cannot create KU100 asset directory" }
         val names = context.assets.list("hrtf")?.toList().orEmpty()
-        val manifestName = "hrtf-set.json"
-        check(manifestName in names && names.any { it.endsWith("_dry.f32") } && names.any { it.endsWith("_wet.f32") }) {
+        check("hrtf-set.json" in names && names.any { it.endsWith("_dry.f32") } && names.any { it.endsWith("_wet.f32") }) {
             "Packaged KU100 HRTF asset set is incomplete"
         }
         names.forEach { name ->
             val packaged = context.assets.open("hrtf/$name").use { it.readBytes() }
-            val destination = java.io.File(hrtfDir, name)
+            val destination = File(hrtfDir, name)
             val matches = if (name.endsWith(".f32")) {
-                val expected = MessageDigest.getInstance("SHA-256").digest(packaged)
-                    .joinToString("") { "%02x".format(it) }
+                val expected = MessageDigest.getInstance("SHA-256").digest(packaged).joinToString("") { "%02x".format(it) }
                 destination.isFile && destination.length() == packaged.size.toLong() && sha256(destination) == expected
-            } else destination.isFile && destination.length() == packaged.size.toLong() &&
-                destination.readBytes().contentEquals(packaged)
+            } else destination.isFile && destination.length() == packaged.size.toLong() && destination.readBytes().contentEquals(packaged)
             if (!matches) destination.writeBytes(packaged)
         }
-        check(java.io.File(hrtfDir, manifestName).isFile) { "KU100 hrtf-set.json was not copied" }
-        hrtfLoadStatus = "KU100 资源已就绪，正在加载"
-        val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
-        val ptr = SdaEngine.nativeInit(config, java.io.File(hrtfDir, manifestName).absolutePath)
+        hrtfLoadStatus = "KU100 已校验，正在 native 加载"
+        val ptr = SdaEngine.nativeInit("""{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}""", File(hrtfDir, "hrtf-set.json").absolutePath)
         if (ptr == 0L) {
-            val detail = SdaEngine.nativeInitError()
-            hrtfLoadStatus = "KU100 加载失败: ${if (detail.isBlank()) "nativeInit failed" else detail}"
-            throw RuntimeException(hrtfLoadStatus)
+            hrtfLoadStatus = "KU100 native 加载失败: ${SdaEngine.nativeInitError().ifBlank { "nativeInit failed" }}"
+            error(hrtfLoadStatus)
         }
+        check(SdaEngine.nativeHrtfLoaded(ptr)) { "native engine did not confirm KU100 load" }
         handle = ptr
-        hrtfLoadStatus = "已加载 KU100 D1 (Apache-2.0)"
-        val result = SdaEngine.nativeStart(ptr)
-        if (result != 0) {
+        hrtfLoadStatus = "KU100 D1 已由 native 加载"
+        val started = SdaEngine.nativeStart(ptr)
+        if (started != 0) {
             SdaEngine.nativeClose(ptr)
             handle = 0L
-            throw RuntimeException("nativeStart failed: $result")
+            error("nativeStart failed: $started")
         }
         ptr
+    }
+
+    private fun closeCurrentEngine() = synchronized(nativeLock) {
+        if (handle != 0L) {
+            SdaEngine.nativeClose(handle)
+            handle = 0L
+        }
     }
 
     private fun stopFeedThread() {
         synchronized(lifecycleLock) {
             stopped = true
-            try {
-                activeInput?.close()
-            } catch (_: Throwable) {
-            }
+            try { activeInput?.close() } catch (_: Throwable) { }
             activeInput = null
             val worker = feedThread
             worker?.interrupt()
             if (worker != null) {
                 worker.join(2_000)
-                check(!worker.isAlive) { "Timed out stopping audio feed thread; native handle retained" }
+                check(!worker.isAlive) { "Timed out stopping media feed thread; native handle retained" }
             }
             feedThread = null
         }
@@ -106,113 +100,95 @@ class SdaModule : Module() {
         Name("SdaEngine")
 
         AsyncFunction("playUri") { uriString: String, displayName: String, headYawDegrees: Double ->
-            require(headYawDegrees.isFinite() && headYawDegrees in -180.0..180.0) { "Head yaw must be finite and between -180 and 180 degrees" }
-            val extension = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
-            if (extension !in setOf("eac3", "ec3")) {
-                throw IllegalArgumentException("Only raw .eac3/.ec3 elementary streams are supported; MP4/MKV/MP3 are not demuxed/decoded yet")
-            }
-            stopFeedThread()
-            val context = appContext?.reactContext ?: throw RuntimeException("no react context")
+            require(headYawDegrees.isFinite() && headYawDegrees in -180.0..180.0) { "Head yaw must be between -180 and 180 degrees" }
+            val ext = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+            require(ext in setOf("eac3", "ec3", "mp3")) { "仅支持裸 E-AC-3 和 MP3 文件" }
+            val context = appContext?.reactContext ?: error("no react context")
             val uri = Uri.parse(uriString)
-            val input = context.contentResolver.openInputStream(uri)
-                ?: throw RuntimeException("Cannot open selected document: $uri")
-            synchronized(nativeLock) {
-                if (handle != 0L) {
-                    SdaEngine.nativeFinish(handle)
-                    SdaEngine.nativeClose(handle)
-                    handle = 0L
-                }
+            val isMp3 = ext == "mp3"
+            val cachePath = if (isMp3 && uri.scheme == "file") File(requireNotNull(uri.path)) else null
+            if (isMp3 && cachePath == null && context.contentResolver.getType(uri) == null) {
+                error("无法识别所选 MP3 文件 URI")
             }
+            val workerGeneration = synchronized(lifecycleLock) { generation += 1; generation }
+            stopped = false
+            val mp3Cache = if (isMp3 && cachePath == null) File(context.cacheDir, "sda-${System.nanoTime()}.mp3") else cachePath
+            if (isMp3 && cachePath == null) {
+                val source = context.contentResolver.openInputStream(uri) ?: error("无法打开所选 MP3 文件")
+                source.use { input -> mp3Cache!!.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        check(!stopped && generation == workerGeneration) { "文件复制已取消" }
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                    }
+                } }
+            }
+            closeCurrentEngine()
             val ptr = ensureEngine()
-            if (SdaEngine.nativeSetHeadYaw(ptr, headYawDegrees.toFloat()) != 0) {
-                throw RuntimeException("Native head yaw command failed during startup")
-            }
-            val workerGeneration = synchronized(lifecycleLock) {
-                generation += 1
-                generation
-            }
+            if (isMp3) check(SdaEngine.nativeOpenMp3(ptr, mp3Cache!!.absolutePath) > 0) { "MP3 打开失败: ${SdaEngine.nativeLastError()}" }
+            check(SdaEngine.nativeSetHeadYaw(ptr, headYawDegrees.toFloat()) == 0) { "Native head yaw command failed" }
+            val input = if (!isMp3) context.contentResolver.openInputStream(uri) ?: error("无法重新打开所选 E-AC-3 文件") else null
             feedError = null
             feedDone = false
             paused = false
             stopped = false
+            activeIsMp3 = isMp3
             activeInput = input
             val worker = Thread({
                 try {
-                    input.use { stream ->
-                        val buffer = ByteArray(24 * 1024)
-                        var lastConsumed = 0L
-                        var lastProgressNs = System.nanoTime()
-                        val maxLead = 48_000L
+                    val buffer = ByteArray(24 * 1024)
+                    input?.use { stream ->
                         while (!stopped) {
-                            val state = synchronized(nativeLock) {
+                            val status = synchronized(nativeLock) {
                                 if (generation != workerGeneration || handle != ptr || stopped) return@Thread
                                 JSONObject(SdaEngine.nativeStatus(ptr))
                             }
-                            val decoded = state.getLong("decodedSamplePos")
-                            val consumed = state.getLong("consumedSamplePos")
-                            val fifoFrames = state.optInt("fifoFrames", 0)
-                            if (consumed != lastConsumed) {
-                                lastConsumed = consumed
-                                lastProgressNs = System.nanoTime()
-                            }
-                            check(decoded == 0L || System.nanoTime() - lastProgressNs < 15_000_000_000L) {
-                                "Audio consumption stalled (decoded=$decoded consumed=$consumed)"
-                            }
-                            if (paused || decoded - consumed > maxLead || fifoFrames > maxLead) {
-                                Thread.sleep(20)
-                                continue
+                            if (paused || status.optLong("decodedSamplePos") - status.optLong("consumedSamplePos") > 48_000L || status.optInt("fifoFrames") > 48_000) {
+                                Thread.sleep(20); continue
                             }
                             val count = stream.read(buffer)
                             if (count < 0) break
                             if (count == 0) continue
-                            val result = synchronized(nativeLock) {
-                                if (generation != workerGeneration || handle != ptr || stopped) -1 else SdaEngine.nativeFeed(
-                                    ptr,
-                                    buffer.copyOf(count)
-                                )
-                            }
+                            val result = synchronized(nativeLock) { if (handle == ptr && !stopped) SdaEngine.nativeFeed(ptr, buffer.copyOf(count)) else -1 }
                             check(result >= 0) { "nativeFeed failed: $result" }
                         }
-                        if (!stopped) {
-                            val eofDeadline = System.nanoTime() + 15_000_000_000L
-                            synchronized(nativeLock) {
-                                if (generation == workerGeneration && handle == ptr && !stopped) {
-                                    val result = SdaEngine.nativeFinish(ptr)
-                                    check(result >= 0) { "nativeFinish failed: $result" }
-                                }
-                            }
-                            while (!stopped) {
-                                val state = synchronized(nativeLock) {
-                                    if (generation != workerGeneration || handle != ptr || stopped) return@Thread
-                                    JSONObject(SdaEngine.nativeStatus(ptr))
-                                }
-                                val decoded = state.getLong("decodedSamplePos")
-                                val consumed = state.getLong("consumedSamplePos")
-                                val remaining = if (decoded > consumed) decoded - consumed else 0L
-                                if (remaining == 0L) break
-                                check(System.nanoTime() < eofDeadline) { "Timed out waiting for audio drain at EOF" }
-                                Thread.sleep(20)
-                            }
-                            synchronized(nativeLock) {
-                                if (generation == workerGeneration && handle == ptr && !stopped) {
-                                    SdaEngine.nativeClose(ptr)
-                                    handle = 0L
-                                    feedDone = true
-                                }
-                            }
-                        }
                     }
-                } catch (error: InterruptedException) {
+                    if (isMp3) {
+                        var eof = false
+                        while (!eof && !stopped) {
+                            val status = synchronized(nativeLock) {
+                                if (generation != workerGeneration || handle != ptr || stopped) return@Thread
+                                JSONObject(SdaEngine.nativeStatus(ptr))
+                            }
+                            if (paused || status.optLong("decodedSamplePos") - status.optLong("consumedSamplePos") > 48_000L || status.optInt("fifoFrames") > 48_000) {
+                                Thread.sleep(20); continue
+                            }
+                            val pulled = synchronized(nativeLock) { if (handle == ptr && !stopped) SdaEngine.nativePullMp3(ptr, 4096) else -1 }
+                            if (pulled == -4) eof = true else check(pulled >= 0) { "native MP3 decode failed: ${SdaEngine.nativeLastError()}" }
+                        }
+                    } else if (!stopped) {
+                        synchronized(nativeLock) { if (handle == ptr) check(SdaEngine.nativeFinish(ptr) >= 0) { "nativeFinish failed" } }
+                    }
+                    if (!stopped) {
+                        val deadline = System.nanoTime() + 15_000_000_000L
+                        while (!stopped) {
+                            val status = synchronized(nativeLock) { if (handle != ptr || stopped) return@Thread else JSONObject(SdaEngine.nativeStatus(ptr)) }
+                            if (status.optLong("decodedSamplePos") <= status.optLong("consumedSamplePos")) break
+                            check(System.nanoTime() < deadline) { "等待 EOF 音频排空超时" }
+                            Thread.sleep(20)
+                        }
+                        synchronized(nativeLock) { if (handle == ptr && !stopped) { SdaEngine.nativeClose(ptr); handle = 0L; feedDone = true } }
+                    }
+                } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 } catch (error: Throwable) {
                     feedError = error.message ?: error.toString()
-                    synchronized(nativeLock) {
-                        if (generation == workerGeneration && handle == ptr) {
-                            SdaEngine.nativeClose(ptr)
-                            handle = 0L
-                        }
-                    }
+                    synchronized(nativeLock) { if (handle == ptr) { SdaEngine.nativeClose(ptr); handle = 0L } }
                     feedDone = true
+                } finally {
+                    activeInput = null
                 }
             }, "sda-content-feed")
             feedThread = worker
@@ -220,87 +196,42 @@ class SdaModule : Module() {
             displayName
         }
 
-        Function("pause") { ->
-            synchronized(nativeLock) {
-                if (handle == 0L) return@synchronized false
+        Function("pause") { -> synchronized(nativeLock) {
+            if (handle == 0L) false else {
                 check(SdaEngine.nativePause(handle, true) == 0) { "native pause failed" }
                 paused = true
                 true
             }
-        }
-
-        Function("resume") { ->
-            synchronized(nativeLock) {
-                if (handle == 0L) return@synchronized false
+        } }
+        Function("resume") { -> synchronized(nativeLock) {
+            if (handle == 0L) false else {
                 check(SdaEngine.nativePause(handle, false) == 0) { "native resume failed" }
                 paused = false
                 true
             }
-        }
-
+        } }
         Function("stop") { ->
             stopFeedThread()
-            synchronized(nativeLock) {
-                if (handle != 0L) {
-                    SdaEngine.nativeFinish(handle)
-                    SdaEngine.nativeClose(handle)
-                    handle = 0L
-                }
-            }
-            feedDone = true
+            closeCurrentEngine()
+            feedDone = false
             true
         }
-
-        Function("status") { ->
-            synchronized(nativeLock) {
-                if (handle == 0L) "{}" else SdaEngine.nativeStatus(handle)
-            }
-        }
-
-        Function("objects") { ->
-            synchronized(nativeLock) {
-                if (handle == 0L) "{}" else SdaEngine.nativeObjects(handle)
-            }
-        }
-
+        Function("status") { -> synchronized(nativeLock) { if (handle == 0L) "{}" else SdaEngine.nativeStatus(handle) } }
+        Function("objects") { -> synchronized(nativeLock) { if (handle == 0L) "{}" else SdaEngine.nativeObjects(handle) } }
         Function("setHeadYaw") { degrees: Double ->
-            require(degrees.isFinite() && degrees in -180.0..180.0) { "Head yaw must be finite and between -180 and 180 degrees" }
-            synchronized(nativeLock) {
-                check(
-                    handle != 0L && SdaEngine.nativeSetHeadYaw(
-                        handle,
-                        degrees.toFloat()
-                    ) == 0
-                ) { "Native head yaw command failed" }
-            }
+            require(degrees.isFinite() && degrees in -180.0..180.0)
+            synchronized(nativeLock) { check(handle != 0L && SdaEngine.nativeSetHeadYaw(handle, degrees.toFloat()) == 0) { "Native head yaw command failed" } }
         }
-
-        Function("resetHeadPose") { ->
-            synchronized(nativeLock) {
-                check(handle != 0L && SdaEngine.nativeResetHeadPose(handle) == 0) { "Native head pose reset failed" }
-            }
-        }
-
-        Function("hrtfStatus") { -> hrtfLoadStatus }
-
+        Function("resetHeadPose") { -> synchronized(nativeLock) { check(handle != 0L && SdaEngine.nativeResetHeadPose(handle) == 0) { "Native head pose reset failed" } } }
+        Function("hrtfStatus") { -> if (handle == 0L) hrtfLoadStatus else if (SdaEngine.nativeHrtfLoaded(handle)) "KU100 D1 已由 native 加载" else "KU100 native 未加载" }
         Function("feedError") { -> feedError }
-
         Function("feedDone") { -> feedDone }
-
-        Function("setVolume") { volume: Float ->
-            synchronized(nativeLock) {
-                if (handle != 0L) SdaEngine.nativeSetVolume(handle, volume)
-            }
-        }
-
+        Function("stereoBedMode") { -> activeIsMp3 }
+        Function("nativeLastError") { -> SdaEngine.nativeLastError() }
+        Function("setVolume") { volume: Float -> synchronized(nativeLock) { if (handle != 0L) check(SdaEngine.nativeSetVolume(handle, volume) == 0) } }
         OnDestroy {
             stopFeedThread()
-            synchronized(nativeLock) {
-                if (handle != 0L) {
-                    SdaEngine.nativeClose(handle)
-                    handle = 0L
-                }
-            }
+            closeCurrentEngine()
         }
     }
 }

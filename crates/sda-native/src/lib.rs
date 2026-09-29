@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sda_core::{FrameData, ObjectEvent, StreamingDecoder};
+pub mod mp3;
 pub use sda_native_renderer::{
     install_event_sink, AudioOutput, Command, Engine, Event, EventSink, NativeObjectEvent,
     RuntimeTelemetry, render_command, stereo_fifo,
@@ -140,6 +141,9 @@ pub struct MobileEngine {
     /// Decoded object metadata retained until the presentation clock reaches it.
     object_events: Mutex<VecDeque<ObjectEvent>>,
     active_objects: Mutex<HashMap<u32, ObjectEvent>>,
+    stereo_bed_mode: bool,
+    mp3_decoder: Option<mp3::Mp3FileDecoder>,
+    hrtf_loaded: bool,
 }
 
 /// Object-event throttle window; mirrors the web player's 66 ms batching.
@@ -167,6 +171,9 @@ impl MobileEngine {
             last_poll: Mutex::new(None),
             object_events: Mutex::new(VecDeque::new()),
             active_objects: Mutex::new(HashMap::new()),
+            stereo_bed_mode: false,
+            mp3_decoder: None,
+            hrtf_loaded: false,
         })
     }
 
@@ -232,7 +239,58 @@ impl MobileEngine {
         renderer
             .replace_hrtf(set, 0.0)
             .map_err(|error| format!("HRTF apply failed: {error}"))?;
+        self.hrtf_loaded = true;
         Ok(())
+    }
+
+    pub fn hrtf_loaded(&self) -> bool { self.hrtf_loaded }
+
+    /// Open a seekable MP3 file. Decoded PCM enters the shared 48 kHz renderer as a stereo bed.
+    pub fn open_mp3(&mut self, path: &str) -> EngineResult<u32> {
+        if self.mp3_decoder.is_some() {
+            return Err("engine already has an active media source".into());
+        }
+        let decoder = mp3::Mp3FileDecoder::open(path)?;
+        let rate = decoder.input_rate();
+        self.mp3_decoder = Some(decoder);
+        self.stereo_bed_mode = true;
+        Ok(rate)
+    }
+
+    /// Pull bounded stereo frames; caller paces by native FIFO/consumption telemetry.
+    pub fn pull_mp3(&mut self, max_frames: usize) -> EngineResult<(usize, bool)> {
+        if !self.stereo_bed_mode { return Err("active source is not an MP3 stereo bed".into()); }
+        let decoder = self.mp3_decoder.as_mut().ok_or("MP3 decoder is unavailable")?;
+        let samples = decoder.read_interleaved(max_frames.min(4096))?;
+        let frames = samples.len() / 2;
+        if frames > 0 {
+            let start = self.decoded_sample_pos();
+            let frame = FrameData {
+                codec: "mp3-stereo-bed", sample_rate: 48_000, sample_pos: start,
+                channels: vec![samples.iter().step_by(2).copied().collect(), samples.iter().skip(1).step_by(2).copied().collect()],
+                labels: vec!["FrontLeft".into(), "FrontRight".into()],
+                raw_bed_labels: vec!["FrontLeft".into(), "FrontRight".into()],
+                events: Vec::new(), object_channels: Vec::new(), program_loudness: None, ramp_duration: 0,
+            };
+            self.pending.lock().expect("pending lock").push_back(frame);
+            *self.newest_sample_pos.lock().expect("clock lock") = start + frames as u64;
+            self.drain_pending_into_pipeline()?;
+        }
+        let done = self.mp3_decoder.as_ref().is_some_and(mp3::Mp3FileDecoder::is_finished);
+        Ok((frames, done))
+    }
+
+    pub fn stereo_bed_mode(&self) -> bool { self.stereo_bed_mode }
+
+    pub fn reset_source_state(&mut self) {
+        self.mp3_decoder = None;
+        self.stereo_bed_mode = false;
+        self.decoder = StreamingDecoder::new("auto").expect("known decoder type");
+        self.pending.lock().expect("pending lock").clear();
+        self.declared_sources.lock().expect("sources lock").clear();
+        self.object_events.lock().expect("object events lock").clear();
+        self.active_objects.lock().expect("active objects lock").clear();
+        *self.newest_sample_pos.lock().expect("clock lock") = 0;
     }
 
     /// Feed demuxed bitstream bytes (any chunking; the decoder re-frames).
