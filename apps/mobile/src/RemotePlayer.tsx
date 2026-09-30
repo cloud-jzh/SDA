@@ -134,7 +134,12 @@ export function RemotePlayer(p: Props) {
             </Pressable>
           </View>
           <View style={[s.row, { gap: 12, marginTop: 8 }]}>
-            {label("音量", true, s.small)}
+            <View accessibilityRole="image" accessibilityLabel="音量" style={{ width: 24, height: 24 }}>
+              <View style={{ position: "absolute", left: 2, top: 9, width: 5, height: 7, borderRadius: 1, backgroundColor: c.muted }} />
+              <View style={{ position: "absolute", left: 6, top: 5, width: 0, height: 0, borderTopWidth: 7, borderBottomWidth: 7, borderRightWidth: 8, borderTopColor: "transparent", borderBottomColor: "transparent", borderRightColor: c.muted }} />
+              <View style={{ position: "absolute", left: 15, top: 8, width: 4, height: 9, borderRightWidth: 1.5, borderRightColor: c.muted, borderRadius: 6 }} />
+              <View style={{ position: "absolute", left: 18, top: 5, width: 5, height: 15, borderRightWidth: 1.5, borderRightColor: c.muted, borderRadius: 8 }} />
+            </View>
             <View accessibilityRole="adjustable" accessibilityLabel="音量" accessibilityValue={{ min: 0, max: 100, now: Math.round(p.volume * 100) }}
               accessibilityActions={[{ name: "increment" }, { name: "decrement" }]}
               onAccessibilityAction={event => p.setVolume(Math.max(0, Math.min(1, p.volume + (event.nativeEvent.actionName === "increment" ? .05 : -.05))))}
