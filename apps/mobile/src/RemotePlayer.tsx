@@ -259,6 +259,7 @@ export function RemotePlayer(p: Props) {
               <View style={s.settingCopy}>{label(room.id && room.name.startsWith("SDA Near-field Control Room") ? "近场录音棚" : room.name, false, s.settingTitle)}{!!room.id && label(`${room.layout} · Windows 房间资产`, true, s.settingDescription)}</View>{label(room.id === p.roomId ? "●" : "○", room.id !== p.roomId, { fontSize: 20 })}
             </Pressable>)}
           </View>
+          {label("房间听音预设：早期反射 −6 dB，直达声和混响尾部保持不变。", true, s.groupHint)}
           {label("外观与输出", true, s.groupTitle)}
           <View style={[s.settingsCard, { backgroundColor: c.panel }]}>
             <View style={s.settingRow}><View style={s.settingCopy}>{label("外观", false, s.settingTitle)}{label("自动跟随系统", true, s.settingDescription)}</View>{label(isLight ? "浅色" : "深色", true, s.settingDescription)}</View>

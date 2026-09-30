@@ -524,7 +524,16 @@ impl MobileEngine {
             if room.layout != self.config.layout { return Err("room layout does not match playback layout".into()); }
             Some(Arc::new(room))
         };
-        let settings = sda_native_renderer::cinema::Settings { enabled: profile.is_some(), ..Default::default() };
+        // Mobile room selection is a listening action (the UI exposes packaged
+        // rooms, not raw measurement comparison). Bypass remains neutral.
+        let settings = if profile.is_some() {
+            sda_native_renderer::cinema::Settings {
+                enabled: true,
+                ..sda_native_renderer::cinema::Settings::room_listening()
+            }
+        } else {
+            sda_native_renderer::cinema::Settings::default()
+        };
         if let Some(pipeline) = &self.pipeline {
             let (reply, received) = std::sync::mpsc::channel();
             pipeline.commands.push(render_command::RenderCommand::Room { settings, profile, reply })
