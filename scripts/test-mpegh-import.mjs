@@ -32,6 +32,7 @@ for(const type of ['mha1','mhm1']){
  const result=await prepare360RaMp4(host,'fixture',type+'.mp4');assert(result);assert(!discarded);const normalized=Buffer.concat(output);writeFileSync(dest+'/motion-'+type+'.mhas',normalized);
  if(type==='mhm1')assert.deepEqual(normalized,bytes);
  assert.deepEqual(decode(normalized),expected,'mobile MP4 extraction must preserve Windows source PCM and objects');
+ assert(output.length < samples.length / 4, "native writes must be batched rather than one per audio AU");
  await result.release();assert(discarded);
- console.log(JSON.stringify({type,packets:samples.length,mp4Bytes:input.length,mhasBytes:normalized.length}));
+ console.log(JSON.stringify({type,packets:samples.length,mp4Bytes:input.length,mhasBytes:normalized.length,nativeWrites:output.length}));
 }

@@ -114,7 +114,7 @@ export function RemotePlayer(p: Props) {
             <View style={{ height: 5, borderRadius: 8, width: `${progress * 100}%`, backgroundColor: c.accent }} />
           </View>
           <View style={[s.row, { marginTop: 9, marginBottom: 12 }]}>{label(time(p.positionMs), true, s.small)}{label(p.durationMs > 0 ? time(p.durationMs) : "--:--", true, s.small)}</View>
-          <View style={[s.transport, { gap: 44 }]}>
+          <View style={[s.transport, { gap: 0, justifyContent: "space-between" }]}>
             <Pressable accessibilityRole="button" accessibilityLabel="上一曲" disabled={p.busy || !p.queue.length} onPress={p.previous} style={[s.headerAction, { opacity: p.busy || !p.queue.length ? .3 : 1 }]}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}><View style={{ width: 3, height: 23, borderRadius: 1, backgroundColor: c.ink }} /><View style={{ width: 0, height: 0, borderTopWidth: 12, borderBottomWidth: 12, borderRightWidth: 19, borderTopColor: "transparent", borderBottomColor: "transparent", borderRightColor: c.ink }} /></View>
             </Pressable>
@@ -127,13 +127,11 @@ export function RemotePlayer(p: Props) {
             <Pressable accessibilityRole="button" accessibilityLabel="下一曲" disabled={p.busy || !p.queue.length} onPress={p.next} style={[s.headerAction, { opacity: p.busy || !p.queue.length ? .3 : 1 }]}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}><View style={{ width: 0, height: 0, borderTopWidth: 12, borderBottomWidth: 12, borderLeftWidth: 19, borderTopColor: "transparent", borderBottomColor: "transparent", borderLeftColor: c.ink }} /><View style={{ width: 3, height: 23, borderRadius: 1, backgroundColor: c.ink }} /></View>
             </Pressable>
-          </View>
-          <View style={{ alignItems: "center", marginTop: 4, marginBottom: 8 }}>
             <Pressable accessibilityRole="button" accessibilityLabel={`播放模式：${PLAYBACK_MODE_LABELS[p.playbackMode]}，点击切换为${PLAYBACK_MODE_LABELS[followingPlaybackMode(p.playbackMode)]}`}
               onPress={() => p.setPlaybackMode(followingPlaybackMode(p.playbackMode))}
-              style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 7, minHeight: 44, paddingHorizontal: 14, borderRadius: 22, backgroundColor: p.playbackMode === "sequence" ? "transparent" : c.soft, opacity: pressed ? .65 : 1 })}>
+              style={({ pressed }) => ({ width: 46, height: 64, justifyContent: "center", alignItems: "center", gap: 2, borderRadius: 22, backgroundColor: p.playbackMode === "sequence" ? "transparent" : c.soft, opacity: pressed ? .65 : 1 })}>
               {label(p.playbackMode === "sequence" ? "≡" : p.playbackMode === "repeat-one" ? "↻₁" : "↻", p.playbackMode === "sequence", { fontSize: 20 })}
-              {label(PLAYBACK_MODE_LABELS[p.playbackMode], p.playbackMode === "sequence", { fontSize: 12, fontWeight: "500" })}
+              {label(PLAYBACK_MODE_LABELS[p.playbackMode], p.playbackMode === "sequence", { fontSize: 10, fontWeight: "500" })}
             </Pressable>
           </View>
           <View style={[s.row, { gap: 12, marginTop: 8 }]}>

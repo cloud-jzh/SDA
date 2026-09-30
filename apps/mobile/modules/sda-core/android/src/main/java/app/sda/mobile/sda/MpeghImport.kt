@@ -21,7 +21,7 @@ class MpeghImport {
             input.use { stream -> source.outputStream().use { stream.copyTo(it, 64 * 1024) } }
             output = File.createTempFile("sda-360ra-", ".mhas", context.cacheDir)
             val token = UUID.randomUUID().toString()
-            sessions[token] = Session(source, output, output.outputStream())
+            sessions[token] = Session(source, output, output.outputStream().buffered(256 * 1024))
             return JSONObject().put("token", token).put("size", source.length()).toString()
         } catch (error: Throwable) {
             source.delete(); output?.delete(); throw error

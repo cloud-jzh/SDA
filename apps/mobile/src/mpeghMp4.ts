@@ -37,9 +37,20 @@ export async function prepare360RaMp4(host: MpeghMp4Host, uri: string, name: str
     onError(message) { failure = message; },
   });
   const writePackets = async () => {
-    for (const packet of packets) for (let offset = 0; offset < packet.length; offset += CHUNK) {
-      await host.appendMp4Import(token, fromByteArray(packet.subarray(offset, offset + CHUNK)));
+    // MPEG-H AUs are small: one native call per AU stalls whole-song import.
+    // Coalesce bytes without changing any packet boundaries in the MHAS stream.
+    const batch = new Uint8Array(CHUNK);
+    let used = 0;
+    for (const packet of packets) for (let offset = 0; offset < packet.length;) {
+      const count = Math.min(CHUNK - used, packet.length - offset);
+      batch.set(packet.subarray(offset, offset + count), used);
+      used += count; offset += count;
+      if (used === CHUNK) {
+        await host.appendMp4Import(token, fromByteArray(batch));
+        used = 0;
+      }
     }
+    if (used) await host.appendMp4Import(token, fromByteArray(batch.subarray(0, used)));
     packets.length = 0;
     if (failure) throw new Error(`MP4 解析失败：${failure}`);
   };
