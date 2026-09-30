@@ -61,6 +61,28 @@ export function RemotePlayer(p: Props) {
   const isLight = useColorScheme() === "light";
   const [volumeWidth, setVolumeWidth] = useState(1);
   const pager = useRef<ScrollView>(null);
+  const playerScroll = useRef<ScrollView>(null);
+  const [adjustingVolume, setAdjustingVolume] = useState(false);
+  const volumeGesture = useMemo(() => {
+    const lockScrolling = (locked: boolean) => {
+      // Block native scrolling immediately, then keep the rendered props in sync.
+      pager.current?.setNativeProps({ scrollEnabled: !locked });
+      playerScroll.current?.setNativeProps({ scrollEnabled: !locked });
+      setAdjustingVolume(locked);
+    };
+    const updateVolume = (x: number) => p.setVolume(Math.max(0, Math.min(1, x / volumeWidth)));
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onShouldBlockNativeResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: event => { lockScrolling(true); updateVolume(event.nativeEvent.locationX); },
+      onPanResponderMove: event => updateVolume(event.nativeEvent.locationX),
+      onPanResponderRelease: () => lockScrolling(false),
+      onPanResponderTerminate: () => lockScrolling(false),
+    });
+  }, [p.setVolume, volumeWidth]);
   const c = isLight ? light : dark;
   const pageWidth = width - 32;
   const cardHeight = Math.max(440, height - 235);
@@ -90,10 +112,10 @@ export function RemotePlayer(p: Props) {
       </View>
       {button("···", "更多设置", showSettings)}
     </View>
-    <ScrollView ref={pager} horizontal pagingEnabled showsHorizontalScrollIndicator={false}
+    <ScrollView ref={pager} horizontal pagingEnabled scrollEnabled={!adjustingVolume} showsHorizontalScrollIndicator={false}
       onMomentumScrollEnd={event => setPage(Math.round(event.nativeEvent.contentOffset.x / pageWidth))}
       onLayout={() => pager.current?.scrollTo({ x: page * pageWidth, animated: false })}>
-      <ScrollView style={{ width: pageWidth }} contentContainerStyle={{ paddingBottom: 6 }}>
+      <ScrollView ref={playerScroll} scrollEnabled={!adjustingVolume} style={{ width: pageWidth }} contentContainerStyle={{ paddingBottom: 6 }}>
         <View style={[s.player, { width: coverSize, alignSelf: "center" }]}>
           <View style={[s.art, { height: coverSize, width: coverSize, alignSelf: "center", backgroundColor: c.panel }]}>
             {p.metadata.coverUri ? <Image source={{ uri: p.metadata.coverUri }} accessibilityLabel={`${p.metadata.album || title} 封面`}
@@ -144,9 +166,7 @@ export function RemotePlayer(p: Props) {
               accessibilityActions={[{ name: "increment" }, { name: "decrement" }]}
               onAccessibilityAction={event => p.setVolume(Math.max(0, Math.min(1, p.volume + (event.nativeEvent.actionName === "increment" ? .05 : -.05))))}
               onLayout={event => setVolumeWidth(event.nativeEvent.layout.width)}
-              onStartShouldSetResponder={() => true} onMoveShouldSetResponder={() => true}
-              onResponderGrant={event => p.setVolume(Math.max(0, Math.min(1, event.nativeEvent.locationX / volumeWidth)))}
-              onResponderMove={event => p.setVolume(Math.max(0, Math.min(1, event.nativeEvent.locationX / volumeWidth)))} style={s.volumeTouch}>
+              {...volumeGesture.panHandlers} style={s.volumeTouch}>
               <View pointerEvents="none" style={[s.volumeTrack, { backgroundColor: c.line }]}><View style={{ width: `${p.volume * 100}%`, height: 5, borderRadius: 8, backgroundColor: c.accent }} /></View>
             </View>{label(`${Math.round(p.volume * 100)}%`, true, { ...s.small, width: 35 })}
           </View>
