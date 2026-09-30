@@ -118,6 +118,8 @@ fn writer_loop(
 ) -> Result<(), String> {
     let mut block = vec![0.0_f32; frames_per_burst * CHANNELS];
     let mut total_written = 0_u64;
+    #[cfg(feature = "pcm-diagnostic")]
+    let mut capture = PcmCapture::requested();
     let mut total_audio = 0_u64;
     let mut partial_writes = 0_u64;
     let mut last_report = Instant::now();
@@ -131,6 +133,10 @@ fn writer_loop(
             0
         };
         let started = Instant::now();
+        #[cfg(feature = "pcm-diagnostic")]
+        if let Some(capture) = &mut capture {
+            capture.push(total_audio, &block[..popped * CHANNELS]);
+        }
         let mut offset = 0;
         // AAudio returns frames, not samples or bytes. Retain unwritten
         // samples across short writes; never fetch a new FIFO block early.
@@ -174,4 +180,45 @@ fn writer_loop(
         }
     }
     Ok(())
+}
+
+// Opt-in diagnostic builds only. Keep the actual application's rendered PCM
+// before AAudio; never perform file IO in the writer's real-time loop.
+#[cfg(feature = "pcm-diagnostic")]
+struct PcmCapture { start: u64, end: u64, samples: Option<Vec<f32>> }
+#[cfg(feature = "pcm-diagnostic")]
+impl PcmCapture {
+    fn requested() -> Option<Self> {
+        unsafe extern "C" { fn __system_property_get(name: *const std::ffi::c_char, value: *mut std::ffi::c_char) -> i32; }
+        let mut bytes = [0i8; 92];
+        let len = unsafe { __system_property_get(c"debug.sda.pcm_capture".as_ptr(), bytes.as_mut_ptr()) };
+        if len <= 0 { return None; }
+        let value = unsafe { std::ffi::CStr::from_ptr(bytes.as_ptr()) }.to_str().ok()?;
+        let (start, end) = value.split_once(',')?;
+        let start = start.parse::<u64>().ok()?;
+        let end = end.parse::<u64>().ok()?;
+        if start >= end || end > 3600 || end-start > 60 { return None; }
+        android_log(&format!("PCM diagnostic armed seconds={start}..{end}"));
+        Some(Self { start: start*48000, end: end*48000, samples: Some(Vec::with_capacity(((end-start)*48000*2) as usize)) })
+    }
+    fn push(&mut self, at: u64, block: &[f32]) {
+        let Some(samples) = &mut self.samples else { return; };
+        let end = at + (block.len()/2) as u64;
+        let first = self.start.max(at);
+        let last = self.end.min(end);
+        if first < last { samples.extend_from_slice(&block[((first-at)*2) as usize..((last-at)*2) as usize]); }
+        if end >= self.end {
+            let samples = self.samples.take().unwrap();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let result = (|| -> std::io::Result<()> {
+                    let file = std::fs::File::create("/sdcard/Android/data/app.sda.mobile/files/render-capture.f32")?;
+                    let mut out = std::io::BufWriter::new(file);
+                    for sample in &samples { out.write_all(&sample.to_le_bytes())?; }
+                    out.flush()
+                })();
+                android_log(&format!("PCM diagnostic frames={} result={result:?}", samples.len()/2));
+            });
+        }
+    }
 }

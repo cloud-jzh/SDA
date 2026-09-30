@@ -64,6 +64,8 @@ pub mod headphone;
 pub mod hrtf;
 pub mod monitor;
 pub mod near_field;
+#[cfg(test)]
+mod mix_parity_probe;
 pub mod object_mixer;
 pub mod occlusion;
 pub mod output_monitor;
@@ -330,6 +332,7 @@ impl AudioOutput for WavDumpOutput {
             if self.stop.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
+            fifo.apply_flush_from_consumer();
             let popped = fifo.pop_into_f32(&mut block, 2);
             dump_polls += 1;
             if dump_polls % 200 == 0 {
@@ -520,7 +523,7 @@ pub struct Health {
     object_rms_db: f32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeObjectEvent {
     id: u32,
@@ -848,9 +851,17 @@ impl ObjectActivitySnapshot {
 #[derive(Default)]
 pub struct RuntimeTelemetry {
     pub shutdown_requested: AtomicBool,
+    /// Applied renderer state, published for mobile UI/diagnostics (not requested settings).
+    pub hrtf_ready: AtomicBool,
+    pub direct_object_hrtf: AtomicBool,
+    pub directional_hrtf: AtomicBool,
+    pub near_field_enabled: AtomicBool,
+    pub room_enabled: AtomicBool,
+    pub object_convolver_count: AtomicU64,
+    pub continuous_object_count: AtomicU64,
     /// Renderer-applied pause state exposed to mobile status polling.
     pub paused: AtomicBool,
-    callback_output_enabled: AtomicBool,
+    pub callback_output_enabled: AtomicBool,
     /// Codec timeline consumed by the audio output, never the worker's
     /// render-ahead clock. Read by mobile hosts as the presentation clock.
     pub callback_consumed_sample_pos: AtomicU64,
@@ -871,6 +882,25 @@ pub struct RuntimeTelemetry {
 }
 
 impl RuntimeTelemetry {
+    fn publish_rendering_state(&self, engine: &Engine) {
+        self.hrtf_ready.store(engine.active_hrtf_set.is_some(), Ordering::Release);
+        self.direct_object_hrtf.store(engine.direct_objects, Ordering::Release);
+        self.directional_hrtf.store(engine.directional_hrtf, Ordering::Release);
+        let near_active = engine.near_field.enabled
+            && (!engine.cinema.monitor.hardware.enabled || engine.directional_hrtf);
+        self.near_field_enabled.store(near_active, Ordering::Release);
+        self.room_enabled.store(engine.cinema.enabled, Ordering::Release);
+        let active = engine.direct_objects || engine.directional_hrtf || near_active;
+        self.object_convolver_count.store(if active {
+            engine.sources.values().filter(|source| source.kind == SourceKind::Object
+                && (source.direct.is_some() || source.continuous.is_some())).count() as u64
+        } else { 0 }, Ordering::Release);
+        self.continuous_object_count.store(if engine.directional_hrtf {
+            engine.sources.values().filter(|source| source.kind == SourceKind::Object
+                && source.continuous.is_some()).count() as u64
+        } else { 0 }, Ordering::Release);
+    }
+
     fn record_max(target: &AtomicU64, value: u64) -> bool {
         let mut current = target.load(Ordering::Relaxed);
         while value > current {
@@ -3310,6 +3340,7 @@ pub fn spawn_render_worker(
                 }
                 remote_audio::publish_mirror(&block[..frames * 2]);
                 telemetry.render_block_count.fetch_add(1, Ordering::Relaxed);
+                telemetry.publish_rendering_state(&engine);
                 // Start pulling the callback only with a solid prebuffer.
                 // Enabling at a thin watermark made the callback catch up to the
                 // renderer during the start burst, and every catch-up dropped to
@@ -3335,7 +3366,7 @@ pub fn spawn_render_worker(
 }
 
 
-pub(crate) fn record_callback(
+pub fn record_callback(
     telemetry: &RuntimeTelemetry,
     started: Instant,
     requested: usize,

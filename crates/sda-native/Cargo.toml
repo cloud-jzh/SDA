@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 # and supply their own AudioOutput (AAudio sink on Android, T2.2).
 default = ["desktop-output"]
 desktop-output = ["sda-native-renderer/cpal-output"]
+pcm-diagnostic = ["sda-native-renderer/pcm-diagnostic"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

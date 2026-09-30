@@ -15,6 +15,17 @@ const MAX_QUEUED_PCM_BYTES: usize = 16 * 1024 * 1024;
 
 pub enum RenderCommand {
     Command(Command),
+    /// One queue entry so mobile settings cannot be only partially enqueued.
+    ObjectRendering { direct: bool, directional: bool },
+    NearField {
+        settings: crate::near_field::Settings,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+    Room {
+        settings: crate::cinema::Settings,
+        profile: Option<std::sync::Arc<crate::cinema::RoomProfile>>,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
     Pcm {
         id: String,
         start: u64,
@@ -29,6 +40,13 @@ pub enum RenderCommand {
         entries: Vec<(String, Vec<f32>)>,
         events: Vec<crate::NativeObjectEvent>,
     },
+    /// Same transaction as the desktop F packet, with its ACK returned to JNI.
+    PcmFrameWithAck {
+        start: u64,
+        entries: Vec<(String, Vec<f32>)>,
+        events: Vec<crate::NativeObjectEvent>,
+        reply: std::sync::mpsc::Sender<bool>,
+    },
     HeadphoneFir {
         preamp: f32,
         left: Vec<f32>,
@@ -41,7 +59,7 @@ impl RenderCommand {
         match self {
             Self::Command(Command::Feed { samples, .. }) => samples.len() * size_of::<f32>(),
             Self::Pcm { samples, .. } => samples.len() * size_of::<f32>(),
-            Self::PcmBatch { entries, .. } | Self::PcmFrame { entries, .. } => entries
+            Self::PcmBatch { entries, .. } | Self::PcmFrame { entries, .. } | Self::PcmFrameWithAck { entries, .. } => entries
                 .iter()
                 .map(|(_, samples)| samples.len() * size_of::<f32>())
                 .sum(),

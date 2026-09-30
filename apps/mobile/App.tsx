@@ -1,7 +1,8 @@
 import React from "react";
+import { nextPlaylistItemId, adjacentPlaylistItemId, type PlaybackMode } from "../web/src/playbackOrder";
 import * as DocumentPicker from "expo-document-picker";
-import { StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { MobileObjectScene, type MobileObjectPoint } from "./src/MobileObjectScene";
+import { RemotePlayer, type TrackMetadata, type QueueTrack } from "./src/RemotePlayer";
+import { type MobileObjectPoint } from "./src/MobileObjectScene";
 
 interface PlaybackStatus {
   consumedSamplePos: number;
@@ -10,10 +11,20 @@ interface PlaybackStatus {
   fifoFrames: number;
   pendingBatches: number;
   paused: boolean;
+  hrtfReady: boolean;
+  hrtfDirections: number;
+  directObjectHrtf: boolean;
+  directionalHrtf: boolean;
+  objectConvolverCount: number;
+  continuousObjectCount: number;
+  nearFieldEnabled: boolean;
+  roomEnabled: boolean;
 }
 interface ObjectPoint extends MobileObjectPoint { samplePos: number; hasPos: boolean }
-const ADM_AXES = "x 右 · y 前 · z 上";
 interface SdaEngineModule {
+  contentHash(uri: string): Promise<string>;
+  metadata(uri: string): Promise<string>;
+  durationMs(uri: string): Promise<number>;
   playUri(uri: string, displayName: string, headYawDegrees: number): Promise<string>;
   pause(): boolean;
   resume(): boolean;
@@ -26,8 +37,16 @@ interface SdaEngineModule {
   feedDone(): boolean;
   setVolume(volume: number): void;
   hrtfStatus(): string;
+  renderingSettings(): string;
+  setObjectRendering(direct: boolean, directional: boolean): void;
+  rooms(): string;
+  setRoom(id: string): Promise<void>;
+  setNearField(enabled: boolean, metresPerUnit: number): Promise<void>;
 }
 interface State {
+  playbackMode: PlaybackMode;
+  queue: QueueTrack[];
+  queueIndex: number;
   busy: boolean;
   playing: boolean;
   ended: boolean;
@@ -36,15 +55,33 @@ interface State {
   fileName: string;
   positionMs: number;
   decodedMs: number;
+  durationMs: number;
+  metadata: TrackMetadata;
   fifoFrames: number;
   objects: ObjectPoint[];
   hrtfStatus: string;
   headYaw: number;
   error: string | null;
+  directObjects: boolean;
+  directionalObjects: boolean;
+  renderingStatus: string;
+  volume: number;
+  rooms: { id: string; name: string; layout: string }[];
+  roomId: string;
+  roomBusy: boolean;
+  nearField: boolean;
+  metresPerUnit: number;
+  nearFieldBusy: boolean;
 }
 
 export default class App extends React.Component<Record<string, never>, State> {
   state: State = {
+    playbackMode: "sequence",
+    queue: [],
+    queueIndex: -1,
+    volume: 1,
+    rooms: [], roomId: "", roomBusy: false,
+    nearField: false, metresPerUnit: 1, nearFieldBusy: false,
     busy: false,
     playing: false,
     ended: false,
@@ -53,14 +90,62 @@ export default class App extends React.Component<Record<string, never>, State> {
     fileName: "",
     positionMs: 0,
     decodedMs: 0,
+    durationMs: 0,
+    metadata: {},
     fifoFrames: 0,
     objects: [],
     hrtfStatus: "KU100 尚未加载",
     headYaw: 0,
     error: null,
+    directObjects: true,
+    directionalObjects: true,
+    renderingStatus: "KU100 · 等待播放",
   };
   private engine?: SdaEngineModule;
+  private changingTrack = false;
   private poller?: ReturnType<typeof setInterval>;
+
+  componentDidMount() {
+    try {
+      const settings = JSON.parse(this.getEngine().renderingSettings());
+      this.setState({ directObjects: settings.direct, directionalObjects: settings.directional,
+        roomId: settings.roomId || "", rooms: JSON.parse(this.getEngine().rooms()),
+        nearField: settings.nearField === true, metresPerUnit: settings.metresPerUnit ?? 1 });
+    } catch (error) {
+      this.setState({ error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  private setObjectRendering = (direct: boolean, directional: boolean) => {
+    try {
+      this.getEngine().setObjectRendering(direct, directional);
+      this.setState({ directObjects: direct, directionalObjects: directional, error: null });
+    } catch (error) {
+      this.setState({ error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  private setRoom = async (roomId: string) => {
+    if (this.state.roomBusy) return;
+    this.setState({ roomBusy: true, error: null });
+    try {
+      await this.getEngine().setRoom(roomId);
+      this.setState({ roomId });
+    } catch (error) {
+      this.setState({ error: error instanceof Error ? error.message : String(error) });
+    } finally { this.setState({ roomBusy: false }); }
+  };
+
+  private setNearField = async (nearField: boolean, metresPerUnit: number) => {
+    if (this.state.nearFieldBusy) return;
+    this.setState({ nearFieldBusy: true, error: null });
+    try {
+      await this.getEngine().setNearField(nearField, metresPerUnit);
+      this.setState({ nearField, metresPerUnit });
+    } catch (error) {
+      this.setState({ error: error instanceof Error ? error.message : String(error) });
+    } finally { this.setState({ nearFieldBusy: false }); }
+  };
 
   componentWillUnmount() {
     if (this.poller) clearInterval(this.poller);
@@ -74,42 +159,71 @@ export default class App extends React.Component<Record<string, never>, State> {
   }
 
   private chooseFile = async () => {
-    if (this.state.busy) return;
+    if (this.changingTrack || this.state.busy) return;
+    this.changingTrack = true;
     this.setState({ busy: true, error: null });
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: "application/octet-stream",
+        type: "*/*",
         copyToCacheDirectory: true,
-        multiple: false,
+        multiple: true,
       });
       if (result.canceled) return;
-      const asset = result.assets[0];
-      if (!asset) throw new Error("文件选择未返回媒体条目");
-      const extension = asset.name.split(".").pop()?.toLowerCase();
-      if (extension !== "eac3" && extension !== "ec3") {
-        throw new Error("首版仅支持裸 .eac3/.ec3 音频流；MP4、MKV 和 MP3 暂不支持");
+      const additions: QueueTrack[] = [];
+      const knownHashes = new Set(this.state.queue.map(track => track.contentHash));
+      for (const asset of result.assets) {
+        const extension = asset.name.split(".").pop()?.toLowerCase();
+        if (!extension || !["eac3", "ec3", "m4a", "mp4"].includes(extension)) {
+          throw new Error("请选择 .eac3/.ec3，或包含 E-AC-3/Atmos 音轨的 .m4a/.mp4 文件");
+        }
+        const contentHash = await this.getEngine().contentHash(asset.uri);
+        if (knownHashes.has(contentHash)) continue;
+        const metadata = JSON.parse(await this.getEngine().metadata(asset.uri)) as TrackMetadata;
+        additions.push({ contentHash, uri: asset.uri, name: asset.name, metadata });
+        knownHashes.add(contentHash);
       }
-      if (this.state.playing) this.engine?.stop();
-      this.setState({ selectedUri: asset.uri, fileName: asset.name, playing: false, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [], error: null });
+      if (!additions.length) return;
+      const queue = [...this.state.queue, ...additions];
+      if (this.state.queueIndex < 0) {
+        const first = queue[0]!;
+        this.setState({ queue, queueIndex: 0, selectedUri: first.uri, fileName: first.name, metadata: first.metadata, durationMs: first.metadata.durationMs ?? 0 });
+      } else this.setState({ queue });
     } catch (error) {
       this.setState({ error: error instanceof Error ? error.message : String(error) });
     } finally {
+      this.changingTrack = false;
       this.setState({ busy: false });
     }
   };
 
-  private playSelected = async () => {
-    if (this.state.busy || !this.state.selectedUri) return;
-    this.setState({ busy: true, error: null, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [] });
+  private setPlaybackMode = (playbackMode: PlaybackMode) => this.setState({ playbackMode });
+
+  private skipTrack = (direction: 1 | -1) => {
+    const items = this.state.queue.map(track => ({ id: track.contentHash }));
+    const currentId = this.state.queue[this.state.queueIndex]?.contentHash ?? null;
+    const nextId = adjacentPlaylistItemId(items, currentId, direction);
+    if (nextId !== null) void this.selectTrack(this.state.queue.findIndex(track => track.contentHash === nextId));
+  };
+
+  private playSelected = () => this.selectTrack(this.state.queueIndex);
+
+  private selectTrack = async (index: number) => {
+    const track = this.state.queue[index];
+    if (this.changingTrack || this.state.busy || !track) return;
+    this.changingTrack = true;
+    this.setState({ queueIndex: index, selectedUri: track.uri, fileName: track.name, metadata: track.metadata,
+      durationMs: track.metadata.durationMs ?? 0, busy: true, playing: false, error: null, ended: false, paused: false, positionMs: 0, decodedMs: 0, fifoFrames: 0, objects: [] });
     try {
       const engine = this.getEngine();
       if (!this.poller) this.poller = setInterval(() => this.pollStatus(), 80);
       this.setState({ hrtfStatus: engine.hrtfStatus() });
-      await engine.playUri(this.state.selectedUri, this.state.fileName, this.state.headYaw);
+      await engine.playUri(track.uri, track.name, this.state.headYaw);
+      engine.setVolume(this.state.volume);
       this.setState({ playing: true, ended: false, paused: false, error: null });
     } catch (error) {
       this.setState({ playing: false, error: error instanceof Error ? error.message : String(error) });
     } finally {
+      this.changingTrack = false;
       this.setState({ busy: false });
     }
   };
@@ -117,7 +231,7 @@ export default class App extends React.Component<Record<string, never>, State> {
   private pollStatus() {
     try {
       const engine = this.engine;
-      if (!engine || (!this.state.playing && !this.state.busy)) return;
+      if (!engine || !this.state.playing || this.state.busy || this.changingTrack) return;
       const value = JSON.parse(engine.status()) as Partial<PlaybackStatus>;
       const feedError = engine.feedError();
       const feedDone = engine.feedDone();
@@ -131,6 +245,16 @@ export default class App extends React.Component<Record<string, never>, State> {
         playing: feedDone ? false : this.state.playing,
         ended: feedDone,
         error: feedError ?? this.state.error,
+        hrtfStatus: engine.hrtfStatus(),
+        renderingStatus: feedDone ? "KU100 · 等待播放" : !value.hrtfReady ? "KU100 · 等待引擎加载"
+          : `KU100${value.hrtfDirections === 61 ? " 高解析" : ""} · ${value.hrtfDirections} 方向 · ${value.directionalHrtf ? "实际方向" : value.directObjectHrtf || value.nearFieldEnabled ? "逐对象" : "虚拟扬声器"}${value.nearFieldEnabled ? " · 近场" : ""}${value.roomEnabled ? " · 房间仿真" : " · 房间关闭"} · ${value.objectConvolverCount ?? 0} 个独立卷积`,
+      }, () => {
+        if (feedDone && !feedError) {
+          const items = this.state.queue.map(track => ({ id: track.contentHash }));
+          const currentId = this.state.queue[this.state.queueIndex]?.contentHash ?? null;
+          const nextId = nextPlaylistItemId(items, currentId, this.state.playbackMode);
+          if (nextId !== null) void this.selectTrack(this.state.queue.findIndex(track => track.contentHash === nextId));
+        }
       });
     } catch (error) {
       this.setState({ error: error instanceof Error ? error.message : String(error) });
@@ -176,69 +300,19 @@ export default class App extends React.Component<Record<string, never>, State> {
     }
   };
 
-  render() {
-    const { busy, playing, ended, paused, selectedUri, fileName, positionMs, decodedMs, fifoFrames, objects, headYaw, error } = this.state;
-    const emptyMessage = ended
-      ? "已到文件末尾 · 对象位置已清空"
-      : !playing
-        ? selectedUri ? "文件已就绪 · 可调整朝向后播放" : "选择 E-AC-3/JOC 音频后查看对象位置"
-        : objects.length === 0
-          ? "当前播放位置没有有效对象坐标"
-          : `${objects.length} 个对象 · 消费时钟 ${formatTime(positionMs)}`;
-    return (
-      <View style={styles.root}>
-        <StatusBar barStyle="light-content" />
-        <Text style={styles.title}>SDA · 空间音频</Text>
-        <View style={styles.scene}><MobileObjectScene objects={objects} /></View>
-        <Text style={styles.file} numberOfLines={1}>{fileName || "选择 E-AC-3/JOC 音频"}</Text>
-        <Text style={styles.status}>{emptyMessage} · {ADM_AXES}</Text>
-        <Text style={styles.status}>
-          {error ?? (playing
-            ? `${paused ? "已暂停" : "播放中"} · ${formatTime(positionMs)} · 解码 ${formatTime(decodedMs)} · FIFO ${fifoFrames}`
-            : ended ? "播放结束 · 可直接重放或调整试听朝向" : "首版支持裸 .eac3/.ec3；MP4/MKV/MP3 暂不支持")}
-        </Text>
-        <View style={styles.controls}>
-          <TouchableOpacity style={styles.primaryButton} onPress={this.chooseFile} disabled={busy}>
-            <Text style={styles.buttonText}>{busy ? "正在处理…" : "选择文件"}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.primaryButton} onPress={this.playSelected} disabled={busy || !selectedUri || playing}>
-            <Text style={styles.buttonText}>{busy ? "正在启动…" : ended ? "重放" : "播放"}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={this.togglePause} disabled={!playing}>
-            <Text style={styles.buttonText}>{paused ? "继续" : "暂停"}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={this.stop} disabled={!playing}>
-            <Text style={styles.buttonText}>停止</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={this.adjustYaw.bind(this, 15)}>
-            <Text style={styles.buttonText}>朝左 15°</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={this.adjustYaw.bind(this, -15)}>
-            <Text style={styles.buttonText}>朝右 15°</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={this.resetYaw}>
-            <Text style={styles.buttonText}>朝向复位 · {headYaw}°</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
+  private setVolume = (volume: number) => {
+    try {
+      this.getEngine().setVolume(volume);
+      this.setState({ volume });
+    } catch (error) {
+      this.setState({ error: error instanceof Error ? error.message : String(error) });
+    }
+  };
 
+  render() {
+    return <RemotePlayer {...this.state} chooseFile={this.chooseFile} play={this.playSelected}
+      selectTrack={this.selectTrack} previous={() => this.skipTrack(-1)} next={() => this.skipTrack(1)} setPlaybackMode={this.setPlaybackMode}
+      togglePause={this.togglePause} stop={this.stop} adjustYaw={this.adjustYaw}
+      resetYaw={this.resetYaw} setVolume={this.setVolume} setRendering={this.setObjectRendering} setRoom={this.setRoom} setNearField={this.setNearField} />;
   }
 }
-
-function formatTime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#0c101c", alignItems: "center", paddingTop: 42, paddingHorizontal: 16 },
-  title: { color: "#dbe2f0", fontSize: 18, fontWeight: "600" },
-  scene: { width: "100%", flex: 1, minHeight: 260, marginTop: 14, backgroundColor: "#111726", borderRadius: 8, overflow: "hidden" },
-  file: { color: "#dbe2f0", fontSize: 14, marginTop: 12, maxWidth: "95%" },
-  status: { color: "#8fa0bd", fontSize: 12, marginTop: 8, paddingHorizontal: 8, textAlign: "center" },
-  controls: { flexDirection: "row", alignItems: "center", justifyContent: "center", flexWrap: "wrap", marginTop: 14, marginBottom: 16, gap: 8 },
-  primaryButton: { backgroundColor: "#2a5bd7", minHeight: 46, justifyContent: "center", paddingHorizontal: 20, paddingVertical: 12, borderRadius: 8 },
-  iconButton: { backgroundColor: "#293244", minHeight: 46, justifyContent: "center", paddingHorizontal: 14, paddingVertical: 12, borderRadius: 8 },
-  buttonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
-});

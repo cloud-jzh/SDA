@@ -128,6 +128,25 @@ android {
     }
 }
 
+// Use the Windows KU100 assets verbatim, including their baked-in calibration.
+// Keep the standard sibling set: the dense loader uses its speaker anchors.
+def mobileAssets = file('src/main/assets')
+def windowsHrtfAssets = file('../../../desktop/native-renderer/hrtf-assets')
+def sharedAssets = layout.buildDirectory.dir('generated/sharedKu100Assets')
+android.sourceSets.main.assets.setSrcDirs([sharedAssets])
+def syncSharedKu100Assets = tasks.register('syncSharedKu100Assets', Sync) {
+    from(mobileAssets) { exclude 'hrtf/**', 'hrtf-dense/**' }
+    from(windowsHrtfAssets) { include 'hrtf/**', 'hrtf-dense/**' }
+    into(sharedAssets)
+    doFirst {
+        def manifest = new groovy.json.JsonSlurper().parse(new File(windowsHrtfAssets, 'hrtf-dense/hrtf-set.json'))
+        if (manifest.positions.size() != 61 || manifest.processing.calibrated != true) {
+            throw new GradleException('Expected the Windows calibrated 61-direction KU100 HRTF')
+        }
+    }
+}
+tasks.named('preBuild').configure { dependsOn(syncSharedKu100Assets) }
+
 // Apply static values from `gradle.properties` to the `android.packagingOptions`
 // Accepts values in comma delimited lists, example:
 // android.packagingOptions.pickFirsts=/LICENSE,**/picasa.ini

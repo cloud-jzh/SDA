@@ -4,6 +4,7 @@ default = ["cpal-output"]
 # DirectSound + MMCSS). Disable for host test runs on machines where the
 # windows crate cannot build, and for engine-only mobile targets.
 cpal-output = ["dep:cpal", "dep:windows", "dep:asio-sys"]
+pcm-diagnostic = []
 
 [lib]
 name = "sda_native_renderer"

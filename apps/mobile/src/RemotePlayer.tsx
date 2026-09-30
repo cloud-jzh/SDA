@@ -1,0 +1,282 @@
+import { followingPlaybackMode, PLAYBACK_MODE_LABELS, type PlaybackMode } from "../../web/src/playbackOrder";
+import React, { useMemo, useRef, useState } from "react";
+import { Animated, Image, Modal, PanResponder, Pressable, ScrollView, StatusBar, StyleSheet, Switch, Text, View, useColorScheme, useWindowDimensions } from "react-native";
+import { MobileObjectScene, type MobileObjectPoint } from "./MobileObjectScene";
+
+export interface TrackMetadata {
+  title?: string; artist?: string; album?: string; albumArtist?: string;
+  year?: string; track?: string; coverUri?: string; durationMs?: number;
+}
+export interface QueueTrack { contentHash: string; uri: string; name: string; metadata: TrackMetadata }
+interface Props {
+  playbackMode: PlaybackMode; setPlaybackMode(mode: PlaybackMode): void;
+  queue: QueueTrack[]; queueIndex: number;
+  selectTrack(index: number): void; previous(): void; next(): void;
+  metadata: TrackMetadata;
+  busy: boolean; playing: boolean; paused: boolean; ended: boolean; selectedUri: string;
+  fileName: string; positionMs: number; decodedMs: number; durationMs: number; objects: MobileObjectPoint[];
+  headYaw: number; error: string | null; directObjects: boolean; directionalObjects: boolean;
+  renderingStatus: string; volume: number;
+  chooseFile(): void; play(): void; togglePause(): void; stop(): void;
+  adjustYaw(delta: number): void; resetYaw(): void; setVolume(value: number): void;
+  setRendering(direct: boolean, directional: boolean): void;
+  rooms: { id: string; name: string; layout: string }[]; roomId: string; roomBusy: boolean;
+  setRoom(id: string): void;
+  nearField: boolean; metresPerUnit: number; nearFieldBusy: boolean;
+  setNearField(enabled: boolean, metresPerUnit: number): void;
+}
+const dark = { bg: "#141619", panel: "#202328", ink: "#f5f6f7", muted: "#a8adb4", line: "#42464d", accent: "#e0e6ed", field: "#2a2e34", soft: "#343b44" };
+const light = { bg: "#f3f4f6", panel: "#ffffff", ink: "#19212b", muted: "#687381", line: "#e5e8ed", accent: "#167d72", field: "#f0f2f5", soft: "#e1efeb" };
+const time = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+
+// Native counterpart of desktop/remote-web: same palette, cards and three-page navigation.
+export function RemotePlayer(p: Props) {
+  const { width, height } = useWindowDimensions();
+  const [page, setPage] = useState(0);
+  const [settings, setSettings] = useState(false);
+  const sheetDrag = useRef(new Animated.Value(0)).current;
+  const sheetHeight = useRef(height);
+  const showSettings = () => { sheetDrag.setValue(0); setSettings(true); };
+  const sheetGesture = useMemo(() => {
+    const returnToTop = () => Animated.spring(sheetDrag, { toValue: 0, tension: 90, friction: 14, useNativeDriver: true }).start();
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: (_, gesture) => gesture.numberActiveTouches === 1 && gesture.dy > 5 && gesture.dy > Math.abs(gesture.dx),
+      onPanResponderGrant: () => sheetDrag.stopAnimation(),
+      onPanResponderMove: (_, gesture) => sheetDrag.setValue(Math.max(0, gesture.dy)),
+      onPanResponderRelease: (_, gesture) => {
+        const threshold = Math.min(96, sheetHeight.current * .18);
+        if (gesture.dy >= threshold || (gesture.dy > 16 && gesture.vy > .8)) {
+          Animated.timing(sheetDrag, { toValue: height, duration: 180, useNativeDriver: true }).start(({ finished }) => {
+            if (finished) setSettings(false);
+          });
+        } else returnToTop();
+      },
+      onPanResponderTerminate: returnToTop,
+      onPanResponderTerminationRequest: () => false,
+    });
+  }, [height, sheetDrag]);
+  const isLight = useColorScheme() === "light";
+  const [volumeWidth, setVolumeWidth] = useState(1);
+  const pager = useRef<ScrollView>(null);
+  const c = isLight ? light : dark;
+  const pageWidth = width - 32;
+  const cardHeight = Math.max(440, height - 235);
+  const coverSize = Math.min(Math.max(160, width - 104), 460);
+  const label = (value: string, muted = false, extra: object = {}) => <Text style={[{ color: muted ? c.muted : c.ink }, extra]}>{value}</Text>;
+  const button = (glyph: string, name: string, action: () => void, disabled = false, large = false) => (
+    <Pressable accessibilityRole="button" accessibilityLabel={name} disabled={disabled} onPress={action}
+      style={({ pressed }) => [s.circle, { backgroundColor: c.field, borderColor: c.line, opacity: disabled ? .35 : pressed ? .65 : 1 }, large && s.play]}>
+      {label(glyph, false, { fontSize: large ? 27 : 22 })}
+    </Pressable>
+  );
+  const navigate = (index: number) => { setPage(index); pager.current?.scrollTo({ x: index * pageWidth, animated: true }); };
+  const progress = p.durationMs > 0 ? Math.max(0, Math.min(1, p.positionMs / p.durationMs)) : 0;
+  const title = p.metadata.title || p.fileName || "等待选择歌曲";
+  const artist = p.metadata.artist || p.metadata.albumArtist;
+  const playback = p.busy ? "正在准备音频…" : p.playing ? p.paused ? "已暂停" : "正在播放" : p.ended ? "播放结束" : p.selectedUri ? "准备就绪" : "选择文件，开始聆听";
+  return <View style={[s.root, { backgroundColor: c.bg }]}>
+    {!isLight && p.metadata.coverUri && <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <Image source={{ uri: p.metadata.coverUri }} blurRadius={65} style={[StyleSheet.absoluteFill, { opacity: .2 }]} />
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: "#10131888" }]} />
+    </View>}
+    <StatusBar barStyle={isLight ? "dark-content" : "light-content"} backgroundColor={c.bg} />
+    <View style={s.header}>
+      {button("＋", "打开本机媒体", p.chooseFile, p.busy)}
+      <View style={{ flex: 1, alignItems: "center" }}>{label(page === 0 ? "正在播放" : page === 1 ? "音乐资料库" : "空间音频", true, s.eyebrow)}
+        <Text numberOfLines={1} style={{ color: c.ink, fontSize: 12, marginTop: 5 }}>{p.metadata.album || "SDA · 本地音乐"}</Text>
+      </View>
+      {button("···", "更多设置", showSettings)}
+    </View>
+    <ScrollView ref={pager} horizontal pagingEnabled showsHorizontalScrollIndicator={false}
+      onMomentumScrollEnd={event => setPage(Math.round(event.nativeEvent.contentOffset.x / pageWidth))}
+      onLayout={() => pager.current?.scrollTo({ x: page * pageWidth, animated: false })}>
+      <ScrollView style={{ width: pageWidth }} contentContainerStyle={{ paddingBottom: 6 }}>
+        <View style={[s.player, { width: coverSize, alignSelf: "center" }]}>
+          <View style={[s.art, { height: coverSize, width: coverSize, alignSelf: "center", backgroundColor: c.panel }]}>
+            {p.metadata.coverUri ? <Image source={{ uri: p.metadata.coverUri }} accessibilityLabel={`${p.metadata.album || title} 封面`}
+              resizeMode="cover" style={{ width: coverSize, height: coverSize, borderRadius: 12 }} /> : <View style={[s.globe, { borderColor: c.accent }]}>
+              <View style={[s.longitude, { borderColor: c.accent }]} /><View style={[s.latitude, { borderColor: c.accent }]} />
+              <View style={[s.equator, { backgroundColor: c.accent }]} />
+            </View>}
+          </View>
+          <View style={s.trackInfo}>
+            <Text numberOfLines={2} style={[s.trackTitle, { color: c.ink }]}>{title}</Text>
+            <Text numberOfLines={1} style={[s.trackSubtitle, { color: c.muted }]}>
+              {artist || (p.selectedUri ? "未知艺人" : "打开音频，开始聆听")}
+            </Text>
+          </View>
+          <View accessibilityRole="progressbar" accessibilityLabel="播放进度"
+            accessibilityValue={p.durationMs > 0 ? { min: 0, max: p.durationMs, now: Math.min(p.positionMs, p.durationMs), text: `${time(p.positionMs)} / ${time(p.durationMs)}` } : { text: "总时长未知" }}
+            style={[s.progress, { backgroundColor: c.line }]}>
+            <View style={{ height: 5, borderRadius: 8, width: `${progress * 100}%`, backgroundColor: c.accent }} />
+          </View>
+          <View style={[s.row, { marginTop: 9, marginBottom: 12 }]}>{label(time(p.positionMs), true, s.small)}{label(p.durationMs > 0 ? time(p.durationMs) : "--:--", true, s.small)}</View>
+          <View style={[s.transport, { gap: 44 }]}>
+            <Pressable accessibilityRole="button" accessibilityLabel="上一曲" disabled={p.busy || !p.queue.length} onPress={p.previous} style={[s.headerAction, { opacity: p.busy || !p.queue.length ? .3 : 1 }]}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}><View style={{ width: 3, height: 23, borderRadius: 1, backgroundColor: c.ink }} /><View style={{ width: 0, height: 0, borderTopWidth: 12, borderBottomWidth: 12, borderRightWidth: 19, borderTopColor: "transparent", borderBottomColor: "transparent", borderRightColor: c.ink }} /></View>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={p.playing && !p.paused ? "暂停" : "播放"}
+              disabled={p.busy || !p.selectedUri} onPress={p.playing ? p.togglePause : p.play}
+              style={({ pressed }) => [s.mainPlay, { backgroundColor: c.ink, opacity: p.busy || !p.selectedUri ? .35 : pressed ? .7 : 1 }]}>
+              {p.playing && !p.paused ? <View style={{ flexDirection: "row", gap: 6 }}><View style={[s.pauseBar, { backgroundColor: c.bg }]} /><View style={[s.pauseBar, { backgroundColor: c.bg }]} /></View>
+                : <View style={{ marginLeft: 5, width: 0, height: 0, borderTopWidth: 12, borderBottomWidth: 12, borderLeftWidth: 20, borderTopColor: "transparent", borderBottomColor: "transparent", borderLeftColor: c.bg }} />}
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="下一曲" disabled={p.busy || !p.queue.length} onPress={p.next} style={[s.headerAction, { opacity: p.busy || !p.queue.length ? .3 : 1 }]}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}><View style={{ width: 0, height: 0, borderTopWidth: 12, borderBottomWidth: 12, borderLeftWidth: 19, borderTopColor: "transparent", borderBottomColor: "transparent", borderLeftColor: c.ink }} /><View style={{ width: 3, height: 23, borderRadius: 1, backgroundColor: c.ink }} /></View>
+            </Pressable>
+          </View>
+          <View style={{ alignItems: "center", marginTop: 4, marginBottom: 8 }}>
+            <Pressable accessibilityRole="button" accessibilityLabel={`播放模式：${PLAYBACK_MODE_LABELS[p.playbackMode]}，点击切换为${PLAYBACK_MODE_LABELS[followingPlaybackMode(p.playbackMode)]}`}
+              onPress={() => p.setPlaybackMode(followingPlaybackMode(p.playbackMode))}
+              style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 7, minHeight: 44, paddingHorizontal: 14, borderRadius: 22, backgroundColor: p.playbackMode === "sequence" ? "transparent" : c.soft, opacity: pressed ? .65 : 1 })}>
+              {label(p.playbackMode === "sequence" ? "≡" : p.playbackMode === "repeat-one" ? "↻₁" : "↻", p.playbackMode === "sequence", { fontSize: 20 })}
+              {label(PLAYBACK_MODE_LABELS[p.playbackMode], p.playbackMode === "sequence", { fontSize: 12, fontWeight: "500" })}
+            </Pressable>
+          </View>
+          <View style={[s.row, { gap: 12, marginTop: 8 }]}>
+            {label("音量", true, s.small)}
+            <View accessibilityRole="adjustable" accessibilityLabel="音量" accessibilityValue={{ min: 0, max: 100, now: Math.round(p.volume * 100) }}
+              accessibilityActions={[{ name: "increment" }, { name: "decrement" }]}
+              onAccessibilityAction={event => p.setVolume(Math.max(0, Math.min(1, p.volume + (event.nativeEvent.actionName === "increment" ? .05 : -.05))))}
+              onLayout={event => setVolumeWidth(event.nativeEvent.layout.width)}
+              onStartShouldSetResponder={() => true} onMoveShouldSetResponder={() => true}
+              onResponderGrant={event => p.setVolume(Math.max(0, Math.min(1, event.nativeEvent.locationX / volumeWidth)))}
+              onResponderMove={event => p.setVolume(Math.max(0, Math.min(1, event.nativeEvent.locationX / volumeWidth)))} style={s.volumeTouch}>
+              <View pointerEvents="none" style={[s.volumeTrack, { backgroundColor: c.line }]}><View style={{ width: `${p.volume * 100}%`, height: 5, borderRadius: 8, backgroundColor: c.accent }} /></View>
+            </View>{label(`${Math.round(p.volume * 100)}%`, true, { ...s.small, width: 35 })}
+          </View>
+        </View>
+      </ScrollView>
+      <ScrollView style={{ width: pageWidth }} contentContainerStyle={{ paddingBottom: 6 }}>
+        <View style={[s.card, { minHeight: cardHeight, backgroundColor: c.panel, borderColor: c.line }]}>
+          <View style={s.row}>{label("播放列表", false, s.sectionTitle)}{label(`${p.queue.length} 首`, true, s.small)}</View>
+          {p.queue.map((track, index) => <Pressable key={`${track.uri}-${index}`} accessibilityRole="button" accessibilityLabel={`播放 ${track.metadata.title || track.name}`} accessibilityState={{ selected: index === p.queueIndex }} onPress={() => index === p.queueIndex && p.playing ? p.togglePause() : p.selectTrack(index)} disabled={p.busy} style={[s.queueItem, { backgroundColor: index === p.queueIndex ? c.soft : "transparent" }]}>
+            {label(String(index + 1).padStart(2, "0"), true, s.small)}<View style={{ flex: 1 }}><Text numberOfLines={2} style={{ color: c.ink }}>{track.metadata.title || track.name}</Text>{!!(track.metadata.artist || track.metadata.albumArtist) && label(track.metadata.artist || track.metadata.albumArtist || "", true, { ...s.small, marginTop: 5 })}</View>{label(index === p.queueIndex && p.playing && !p.paused ? "Ⅱ" : "▶")}
+          </Pressable>)}
+          {!p.queue.length && label("还没有添加歌曲。", true, { marginVertical: 28 })}
+          <Pressable accessibilityRole="button" onPress={p.chooseFile} disabled={p.busy} style={[s.choose, { borderColor: c.line }]}>{label("＋  打开本机媒体", false, { color: c.accent })}</Pressable>
+          {label(`可多选文件加入列表。当前：${PLAYBACK_MODE_LABELS[p.playbackMode]}。`, true, s.help)}
+        </View>
+      </ScrollView>
+      <ScrollView style={{ width: pageWidth }} contentContainerStyle={{ paddingBottom: 6 }}>
+        <View style={[s.card, { minHeight: cardHeight, backgroundColor: c.panel, borderColor: c.line }]}>
+          <View style={s.row}>{label("空间视图", false, s.sectionTitle)}{label(`${p.objects.length} 个对象`, true, s.small)}</View>
+          {label("7.1.4 · 对象实时位置", true, { ...s.small, marginTop: 12 })}
+          <View style={[s.scene, { height: Math.max(260, height * .40) }]}>{page === 2 && <MobileObjectScene objects={p.objects} />}</View>
+          {label("单指旋转 · 双指缩放", true, s.help)}
+        </View>
+      </ScrollView>
+    </ScrollView>
+    <View style={s.tabs}>{["播放", "列表", "空间"].map((name, index) => <Pressable key={name} accessibilityRole="tab" accessibilityState={{ selected: page === index }} onPress={() => navigate(index)} style={s.tab}>
+      <View style={{ paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, backgroundColor: page === index ? c.field : "transparent" }}>{label(name, page !== index, { fontSize: 12, fontWeight: page === index ? "600" : "400" })}</View></Pressable>)}</View>
+    {p.error && <Text accessibilityRole="alert" style={s.error}>{p.error}</Text>}
+    {p.busy && label(playback, true, s.centerHint)}
+    <Modal transparent visible={settings} animationType="slide" onRequestClose={() => setSettings(false)}>
+      <StatusBar barStyle={isLight ? "dark-content" : "light-content"} backgroundColor={c.bg} />
+      <Animated.View style={[s.backdrop, { opacity: sheetDrag.interpolate({ inputRange: [0, height], outputRange: [1, 0], extrapolate: "clamp" }) }]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="关闭设置" style={StyleSheet.absoluteFill} onPress={() => setSettings(false)} />
+      </Animated.View>
+      <Animated.View onLayout={event => { sheetHeight.current = event.nativeEvent.layout.height; }} style={[s.sheet, { backgroundColor: c.bg, maxHeight: height - 64, transform: [{ translateY: sheetDrag }] }]}>
+        <View collapsable={false} {...sheetGesture.panHandlers} accessible accessibilityLabel="播放设置，向下滑动关闭" accessibilityActions={[{ name: "dismiss", label: "关闭设置" }]} onAccessibilityAction={event => { if (event.nativeEvent.actionName === "dismiss") setSettings(false); }}>
+        <View style={[s.sheetHandle, { backgroundColor: c.line }]} />
+        <View style={s.sheetHeader}>
+          <View style={{ flex: 1 }}>{label("播放设置", false, s.sheetTitle)}{label("调整你的空间聆听体验", true, s.sheetSubtitle)}</View>
+        </View>
+        </View>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.sheetContent}>
+          <View style={s.quickActions}>
+            {[{ name: "重新播放", action: p.play, disabled: p.busy || !p.selectedUri }, { name: "停止播放", action: p.stop, disabled: p.busy || !p.playing }].map(action =>
+              <Pressable key={action.name} accessibilityRole="button" disabled={action.disabled} onPress={() => { setSettings(false); action.action(); }}
+                style={({ pressed }) => [s.quickAction, { backgroundColor: c.panel, opacity: action.disabled ? .35 : pressed ? .65 : 1 }]}>{label(action.name, false, s.settingTitle)}</Pressable>)}
+          </View>
+          <Pressable accessibilityRole="button" disabled={p.busy} onPress={() => { setSettings(false); p.chooseFile(); }} style={[s.settingsCard, s.settingRow, { backgroundColor: c.panel }]}>
+            <View style={s.settingCopy}>{label("打开本机媒体", false, s.settingTitle)}{label("添加歌曲到播放列表", true, s.settingDescription)}</View>{label("›", true, { fontSize: 26 })}
+          </Pressable>
+          {label("空间渲染", true, s.groupTitle)}
+          <View style={[s.settingsCard, { backgroundColor: c.panel }]}>
+            <View style={s.profileHeader}><View style={s.settingCopy}>{label("KU100 双耳音频", false, s.profileTitle)}{label("61 方向 HRTF", true, s.settingDescription)}</View><View style={[s.profileBadge, { backgroundColor: c.soft }]}>{label("耳廓", false, { fontSize: 11 })}</View></View>
+            <View style={[s.cardDivider, { backgroundColor: c.line }]} />
+            <View style={s.settingRow}><View style={s.settingCopy}>{label("逐对象渲染", false, s.settingTitle)}{label("为每个对象独立生成双耳声音", true, s.settingDescription)}</View><Switch accessibilityLabel="基础逐对象双耳渲染" trackColor={{ false: c.line, true: "#167d72" }} thumbColor="#ffffff" value={p.directObjects} disabled={p.busy} onValueChange={value => p.setRendering(value, p.directionalObjects)} /></View>
+            <View style={[s.cardDivider, { backgroundColor: c.line }]} />
+            <View style={s.settingRow}><View style={s.settingCopy}>{label("实际方向", false, s.settingTitle)}{label("按对象的真实位置定位声音", true, s.settingDescription)}</View><Switch accessibilityLabel="按对象实际方向渲染" trackColor={{ false: c.line, true: "#167d72" }} thumbColor="#ffffff" value={p.directionalObjects} disabled={p.busy} onValueChange={value => p.setRendering(p.directObjects, value)} /></View>
+          </View>
+          {label("实际方向会自动启用逐对象处理；两项均关闭时使用虚拟扬声器。", true, s.groupHint)}
+          {label("距离与房间", true, s.groupTitle)}
+          <View style={[s.settingsCard, { backgroundColor: c.panel }]}>
+            <View style={s.settingRow}><View style={s.settingCopy}>{label("近场声源", false, s.settingTitle)}{label("保留近距离声源的双耳差异", true, s.settingDescription)}</View><Switch accessibilityLabel="近距离双耳差异" trackColor={{ false: c.line, true: "#167d72" }} thumbColor="#ffffff" value={p.nearField} disabled={p.busy || p.roomBusy || p.nearFieldBusy} onValueChange={enabled => p.setNearField(enabled, p.metresPerUnit)} /></View>
+            <View style={[s.cardDivider, { backgroundColor: c.line }]} />
+            <View style={s.settingRow}><View style={s.settingCopy}>{label("距离映射", false, s.settingTitle)}{label(p.nearFieldBusy ? "正在应用…" : "每个坐标单位对应的距离", true, s.settingDescription)}</View>
+              <View style={[s.stepper, { backgroundColor: c.field }]}>
+                <Pressable accessibilityRole="button" accessibilityLabel="减小近场距离映射" style={s.stepperButton} disabled={p.busy || p.nearFieldBusy || p.metresPerUnit <= .25} onPress={() => p.setNearField(p.nearField, Math.max(.25, Math.round((p.metresPerUnit-.05)*100)/100))}>{label("−", false, { fontSize: 20 })}</Pressable>
+                {label(`${p.metresPerUnit.toFixed(2)} m`, false, { fontSize: 13, fontVariant: ["tabular-nums"] })}
+                <Pressable accessibilityRole="button" accessibilityLabel="增大近场距离映射" style={s.stepperButton} disabled={p.busy || p.nearFieldBusy || p.metresPerUnit >= 4} onPress={() => p.setNearField(p.nearField, Math.min(4, Math.round((p.metresPerUnit+.05)*100)/100))}>{label("＋", false, { fontSize: 20 })}</Pressable>
+              </View>
+            </View>
+          </View>
+          <View style={[s.settingsCard, { backgroundColor: c.panel, marginTop: 12 }]}>
+            <View style={s.profileHeader}>{label("房间仿真", false, s.settingTitle)}{label(p.roomBusy ? "切换中…" : p.roomId ? "已开启" : "已关闭", true, s.settingDescription)}</View>
+            {[{ id: "", name: "关闭", layout: "" }, ...p.rooms].map(room => <Pressable key={room.id} accessibilityRole="radio" accessibilityState={{ checked: room.id === p.roomId, disabled: p.busy || p.roomBusy }} accessibilityLabel={room.id ? "近场录音棚房间仿真" : "关闭房间仿真"} disabled={p.busy || p.roomBusy} onPress={() => p.setRoom(room.id)} style={[s.roomOption, { borderColor: room.id === p.roomId ? "#167d72" : c.line, backgroundColor: room.id === p.roomId ? c.soft : "transparent", opacity: p.roomBusy ? .5 : 1 }]}>
+              <View style={s.settingCopy}>{label(room.id && room.name.startsWith("SDA Near-field Control Room") ? "近场录音棚" : room.name, false, s.settingTitle)}{!!room.id && label(`${room.layout} · Windows 房间资产`, true, s.settingDescription)}</View>{label(room.id === p.roomId ? "●" : "○", room.id !== p.roomId, { fontSize: 20 })}
+            </Pressable>)}
+          </View>
+          {label("外观与输出", true, s.groupTitle)}
+          <View style={[s.settingsCard, { backgroundColor: c.panel }]}>
+            <View style={s.settingRow}><View style={s.settingCopy}>{label("外观", false, s.settingTitle)}{label("自动跟随系统", true, s.settingDescription)}</View>{label(isLight ? "浅色" : "深色", true, s.settingDescription)}</View>
+            <View style={[s.cardDivider, { backgroundColor: c.line }]} />
+            <View style={s.outputDetails}>{label("音频输出", false, s.settingTitle)}{label(p.playing ? p.renderingStatus : "等待播放", true, s.settingDescription)}{label("48 kHz · 浮点 PCM · 双声道", true, s.settingDescription)}</View>
+          </View>
+        </ScrollView>
+      </Animated.View>
+    </Modal>
+  </View>;
+}
+const s = StyleSheet.create({
+  root: { flex: 1, paddingTop: 12, paddingHorizontal: 16, paddingBottom: 12 },
+  header: { flexDirection: "row", alignItems: "center", gap: 16, marginBottom: 12 },
+  headerAction: { width: 46, height: 46, justifyContent: "center", alignItems: "center" },
+  player: { paddingBottom: 8 },
+  mainPlay: { width: 64, height: 64, borderRadius: 32, justifyContent: "center", alignItems: "center" },
+  pauseBar: { width: 6, height: 23, borderRadius: 1 },
+  eyebrow: { fontSize: 10, letterSpacing: 2.2 }, title: { fontSize: 22, fontWeight: "600", marginTop: 8 },
+  card: { borderWidth: 1, borderRadius: 24, padding: 22 }, row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  progress: { height: 5, borderRadius: 8, marginTop: 18, overflow: "hidden" },
+  small: { fontSize: 11 }, sectionTitle: { fontSize: 19, fontWeight: "600" },
+  art: { alignItems: "center", justifyContent: "center", borderRadius: 12, elevation: 12, shadowColor: "#000", shadowOpacity: .3, shadowRadius: 18, shadowOffset: { width: 0, height: 12 } }, globe: { width: 100, height: 100, borderRadius: 50, borderWidth: 1, alignItems: "center", justifyContent: "center", opacity: .7 },
+  longitude: { position: "absolute", width: 46, height: 100, borderRadius: 50, borderWidth: 1 }, latitude: { position: "absolute", width: 100, height: 40, borderRadius: 50, borderWidth: 1 }, equator: { width: 98, height: 1 },
+  trackInfo: { marginTop: 38, marginBottom: 0 },
+  trackTitle: { fontSize: 23, lineHeight: 32, textAlign: "left", fontWeight: "500", letterSpacing: 0, includeFontPadding: false },
+  trackSubtitle: { fontSize: 14, lineHeight: 22, marginTop: 8, fontWeight: "400", includeFontPadding: false },
+  centerHint: { fontSize: 12, textAlign: "center", marginTop: 12, lineHeight: 20 },
+  circle: { width: 46, height: 46, borderRadius: 30, borderWidth: 1, alignItems: "center", justifyContent: "center" }, play: { width: 64, height: 64, borderRadius: 32 },
+  transport: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 25 }, volumeTouch: { flex: 1, height: 44, justifyContent: "center" }, volumeTrack: { height: 5, borderRadius: 8 },
+  tabs: { flexDirection: "row", justifyContent: "center", gap: 8, paddingTop: 8 }, tab: { minWidth: 48, alignItems: "center", padding: 2 },
+  footer: { flexDirection: "row", justifyContent: "space-between", marginTop: 12 },
+  queueItem: { flexDirection: "row", alignItems: "center", gap: 16, padding: 18, borderRadius: 14, marginTop: 26 }, choose: { padding: 16, alignItems: "center", borderRadius: 14, borderWidth: 1, marginTop: 20 },
+  help: { fontSize: 12, lineHeight: 20, marginTop: 12, textAlign: "center" }, scene: { borderRadius: 16, overflow: "hidden", marginTop: 16, backgroundColor: "#171a19" },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "#0008" }, sheet: { position: "absolute", bottom: 0, right: 0, left: 0, borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: "hidden" },
+  sheetHandle: { width: 36, height: 4, borderRadius: 2, alignSelf: "center", marginTop: 10 },
+  sheetHeader: { flexDirection: "row", alignItems: "center", paddingHorizontal: 22, paddingTop: 18, paddingBottom: 20 },
+  sheetTitle: { fontSize: 23, fontWeight: "600", lineHeight: 30, includeFontPadding: false },
+  sheetSubtitle: { fontSize: 13, lineHeight: 20, marginTop: 4 },
+  sheetContent: { paddingHorizontal: 18, paddingBottom: 32 },
+  quickActions: { flexDirection: "row", gap: 12, marginBottom: 12 },
+  quickAction: { flex: 1, borderRadius: 16, minHeight: 52, justifyContent: "center", alignItems: "center" },
+  settingsCard: { borderRadius: 18, paddingHorizontal: 16, overflow: "hidden" },
+  groupTitle: { fontSize: 12, fontWeight: "500", marginTop: 24, marginBottom: 10, marginLeft: 4 },
+  groupHint: { fontSize: 12, lineHeight: 19, marginTop: 10, paddingHorizontal: 4 },
+  settingRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, minHeight: 76, paddingVertical: 14 },
+  settingCopy: { flex: 1 },
+  settingTitle: { fontSize: 15, lineHeight: 22, fontWeight: "500", includeFontPadding: false },
+  settingDescription: { fontSize: 12, lineHeight: 19, marginTop: 4 },
+  profileHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, paddingVertical: 18 },
+  profileTitle: { fontSize: 17, lineHeight: 24, fontWeight: "600" },
+  profileBadge: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
+  cardDivider: { height: StyleSheet.hairlineWidth },
+  stepper: { flexDirection: "row", alignItems: "center", borderRadius: 12 },
+  stepperButton: { width: 34, height: 44, alignItems: "center", justifyContent: "center" },
+  roomOption: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderRadius: 12, padding: 14, marginBottom: 12 },
+  outputDetails: { paddingVertical: 16 },
+  setting: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 52, gap: 8 }, divider: { height: 1 }, error: { color: "#dd7c73", fontSize: 12, paddingTop: 8 },
+});

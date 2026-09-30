@@ -6,12 +6,12 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.InputStream
-import java.util.Locale
 import java.security.MessageDigest
 
-/** Android Expo bridge. Supports raw E-AC-3/JOC elementary streams only. */
+/** Android Expo bridge for raw and M4A/MP4-contained E-AC-3/JOC streams. */
 class SdaModule : Module() {
     private var handle: Long = 0L
+    private var media3Output: Media3Output? = null
     private var feedThread: Thread? = null
     @Volatile
     private var stopped = false
@@ -46,37 +46,62 @@ class SdaModule : Module() {
     private fun ensureEngine(): Long = synchronized(nativeLock) {
         if (handle != 0L) return@synchronized handle
         val context = appContext?.reactContext ?: throw RuntimeException("no react context")
-        val hrtfDir = java.io.File(context.filesDir, "hrtf")
-        check(hrtfDir.mkdirs() || hrtfDir.isDirectory) { "Cannot create KU100 asset directory: $hrtfDir" }
-        val names = context.assets.list("hrtf")?.toList().orEmpty()
-        val manifestName = "hrtf-set.json"
-        check(manifestName in names && names.any { it.endsWith("_dry.f32") } && names.any { it.endsWith("_wet.f32") }) {
-            "Packaged KU100 HRTF asset set is incomplete"
+        // Ask Android to provision the app-owned directory (also used by
+        // opt-in native PCM diagnostic builds), rather than creating it via adb.
+        context.getExternalFilesDir(null)
+        // The dense KU100 set uses the sibling standard set for speaker anchors.
+        for (assetDirectory in listOf("hrtf", "hrtf-dense")) {
+            val hrtfDir = java.io.File(context.filesDir, assetDirectory)
+            check(hrtfDir.mkdirs() || hrtfDir.isDirectory) { "Cannot create KU100 asset directory: $hrtfDir" }
+            val names = context.assets.list(assetDirectory)?.toList().orEmpty()
+            val manifestName = "hrtf-set.json"
+            check(manifestName in names && names.any { it.endsWith("_dry.f32") } && names.any { it.endsWith("_wet.f32") }) {
+                "Packaged KU100 HRTF asset set is incomplete"
+            }
+            names.forEach { name ->
+                val packaged = context.assets.open("$assetDirectory/$name").use { it.readBytes() }
+                val destination = java.io.File(hrtfDir, name)
+                val matches = if (name.endsWith(".f32")) {
+                    val expected = MessageDigest.getInstance("SHA-256").digest(packaged)
+                        .joinToString("") { "%02x".format(it) }
+                    destination.isFile && destination.length() == packaged.size.toLong() && sha256(destination) == expected
+                } else destination.isFile && destination.length() == packaged.size.toLong() &&
+                    destination.readBytes().contentEquals(packaged)
+                if (!matches) destination.writeBytes(packaged)
+            }
+            check(java.io.File(hrtfDir, manifestName).isFile) { "KU100 hrtf-set.json was not copied" }
         }
-        names.forEach { name ->
-            val packaged = context.assets.open("hrtf/$name").use { it.readBytes() }
-            val destination = java.io.File(hrtfDir, name)
-            val matches = if (name.endsWith(".f32")) {
-                val expected = MessageDigest.getInstance("SHA-256").digest(packaged)
-                    .joinToString("") { "%02x".format(it) }
-                destination.isFile && destination.length() == packaged.size.toLong() && sha256(destination) == expected
-            } else destination.isFile && destination.length() == packaged.size.toLong() &&
-                destination.readBytes().contentEquals(packaged)
-            if (!matches) destination.writeBytes(packaged)
-        }
-        check(java.io.File(hrtfDir, manifestName).isFile) { "KU100 hrtf-set.json was not copied" }
         hrtfLoadStatus = "KU100 资源已就绪，正在加载"
-        val config = """{"sampleRate":48000,"outputChannels":2,"layout":"7.1.4"}"""
-        val ptr = SdaEngine.nativeInit(config, java.io.File(hrtfDir, manifestName).absolutePath)
+        val settings = renderingSettings()
+        val config = JSONObject().put("sampleRate", 48000).put("outputChannels", 2)
+            .put("layout", "7.1.4").put("directObjectHrtf", settings.getBoolean("direct"))
+            .put("directionalHrtf", settings.getBoolean("directional")).toString()
+        val ptr = SdaEngine.nativeInit(config, java.io.File(context.filesDir, "hrtf-dense/hrtf-set.json").absolutePath)
         if (ptr == 0L) {
             val detail = SdaEngine.nativeInitError()
             hrtfLoadStatus = "KU100 加载失败: ${if (detail.isBlank()) "nativeInit failed" else detail}"
             throw RuntimeException(hrtfLoadStatus)
         }
         handle = ptr
-        hrtfLoadStatus = "已加载 KU100 D1 (Apache-2.0)"
-        val result = SdaEngine.nativeStart(ptr)
+        try {
+            val roomPath = RoomAssets.prepare(context, settings.getString("roomId"))
+            if (roomPath.isNotEmpty()) {
+                val error = SdaEngine.nativeSetRoom(ptr, roomPath)
+                check(error.isEmpty()) { error }
+            }
+            val nearError = SdaEngine.nativeSetNearField(ptr, settings.getBoolean("nearField"), settings.getDouble("metresPerUnit").toFloat())
+            check(nearError.isEmpty()) { nearError }
+        } catch (error: Throwable) {
+            SdaEngine.nativeClose(ptr)
+            handle = 0L
+            throw error
+        }
+        hrtfLoadStatus = "已加载 KU100 D1 · 61 方向 (Apache-2.0)"
+        val output = Media3Output(context.applicationContext)
+        media3Output = output
+        val result = SdaEngine.nativeStart(ptr, output)
         if (result != 0) {
+            output.close()
             SdaEngine.nativeClose(ptr)
             handle = 0L
             throw RuntimeException("nativeStart failed: $result")
@@ -105,17 +130,68 @@ class SdaModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("SdaEngine")
 
+        AsyncFunction("contentHash") { uriString: String ->
+            val context = appContext.reactContext ?: throw RuntimeException("no react context")
+            MediaMetadata.contentHash(context, Uri.parse(uriString))
+        }
+
+        AsyncFunction("metadata") { uriString: String ->
+            val context = appContext.reactContext ?: throw RuntimeException("no react context")
+            MediaMetadata.read(context, Uri.parse(uriString)).toString()
+        }
+
+        AsyncFunction("durationMs") { uriString: String ->
+            val context = appContext.reactContext ?: throw RuntimeException("no react context")
+            Eac3Input.durationMs(context, Uri.parse(uriString))
+        }
+
+        Function("renderingSettings") { -> renderingSettings().toString() }
+
+        AsyncFunction("setNearField") { enabled: Boolean, metresPerUnit: Double ->
+            require(metresPerUnit.isFinite() && metresPerUnit in 0.25..4.0) { "近场距离映射必须在 0.25–4 米之间" }
+            synchronized(nativeLock) {
+                if (handle != 0L) {
+                    val error = SdaEngine.nativeSetNearField(handle, enabled, metresPerUnit.toFloat())
+                    check(error.isEmpty()) { error }
+                }
+                val context = appContext.reactContext ?: error("no react context")
+                context.getSharedPreferences("sda-rendering", 0).edit()
+                    .putBoolean("nearField", enabled).putFloat("metresPerUnit", metresPerUnit.toFloat()).apply()
+            }
+        }
+
+        Function("rooms") { -> RoomAssets.list(appContext.reactContext ?: error("no react context")).toString() }
+
+        AsyncFunction("setRoom") { id: String ->
+            val context = appContext.reactContext ?: error("no react context")
+            val path = RoomAssets.prepare(context, id)
+            synchronized(nativeLock) {
+                if (handle != 0L) {
+                    val error = SdaEngine.nativeSetRoom(handle, path)
+                    check(error.isEmpty()) { error }
+                }
+                context.getSharedPreferences("sda-rendering", 0).edit().putString("roomId", id).apply()
+            }
+        }
+
+        Function("setObjectRendering") { direct: Boolean, directional: Boolean ->
+            synchronized(nativeLock) {
+                if (handle != 0L) {
+                    check(SdaEngine.nativeSetObjectRendering(handle, direct, directional) == 0) {
+                        "对象渲染设置未被原生引擎接受"
+                    }
+                }
+                val context = appContext.reactContext ?: throw RuntimeException("no react context")
+                context.getSharedPreferences("sda-rendering", 0).edit()
+                    .putBoolean("direct", direct).putBoolean("directional", directional).apply()
+            }
+        }
+
         AsyncFunction("playUri") { uriString: String, displayName: String, headYawDegrees: Double ->
             require(headYawDegrees.isFinite() && headYawDegrees in -180.0..180.0) { "Head yaw must be finite and between -180 and 180 degrees" }
-            val extension = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
-            if (extension !in setOf("eac3", "ec3")) {
-                throw IllegalArgumentException("Only raw .eac3/.ec3 elementary streams are supported; MP4/MKV/MP3 are not demuxed/decoded yet")
-            }
             stopFeedThread()
             val context = appContext?.reactContext ?: throw RuntimeException("no react context")
             val uri = Uri.parse(uriString)
-            val input = context.contentResolver.openInputStream(uri)
-                ?: throw RuntimeException("Cannot open selected document: $uri")
             synchronized(nativeLock) {
                 if (handle != 0L) {
                     SdaEngine.nativeFinish(handle)
@@ -123,9 +199,22 @@ class SdaModule : Module() {
                     handle = 0L
                 }
             }
-            val ptr = ensureEngine()
-            if (SdaEngine.nativeSetHeadYaw(ptr, headYawDegrees.toFloat()) != 0) {
-                throw RuntimeException("Native head yaw command failed during startup")
+            val input = Eac3Input.open(context, uri, displayName)
+            val ptr = try {
+                ensureEngine().also {
+                    check(SdaEngine.nativeSetHeadYaw(it, headYawDegrees.toFloat()) == 0) {
+                        "Native head yaw command failed during startup"
+                    }
+                }
+            } catch (error: Throwable) {
+                input.close()
+                synchronized(nativeLock) {
+                    if (handle != 0L) {
+                        SdaEngine.nativeClose(handle)
+                        handle = 0L
+                    }
+                }
+                throw error
             }
             val workerGeneration = synchronized(lifecycleLock) {
                 generation += 1
@@ -142,7 +231,9 @@ class SdaModule : Module() {
                         val buffer = ByteArray(24 * 1024)
                         var lastConsumed = 0L
                         var lastProgressNs = System.nanoTime()
-                        val maxLead = 48_000L
+                        // player.ts TARGET_AHEAD_SECONDS: same four-second decode
+                        // reserve, paced against presented audio rather than FIFO size.
+                        val maxLead = 4 * 48_000L
                         while (!stopped) {
                             val state = synchronized(nativeLock) {
                                 if (generation != workerGeneration || handle != ptr || stopped) return@Thread
@@ -151,6 +242,11 @@ class SdaModule : Module() {
                             val decoded = state.getLong("decodedSamplePos")
                             val consumed = state.getLong("consumedSamplePos")
                             val fifoFrames = state.optInt("fifoFrames", 0)
+                            if (paused) {
+                                lastProgressNs = System.nanoTime()
+                                Thread.sleep(20)
+                                continue
+                            }
                             if (consumed != lastConsumed) {
                                 lastConsumed = consumed
                                 lastProgressNs = System.nanoTime()
@@ -158,7 +254,7 @@ class SdaModule : Module() {
                             check(decoded == 0L || System.nanoTime() - lastProgressNs < 15_000_000_000L) {
                                 "Audio consumption stalled (decoded=$decoded consumed=$consumed)"
                             }
-                            if (paused || decoded - consumed > maxLead || fifoFrames > maxLead) {
+                            if (decoded - consumed > maxLead || fifoFrames > maxLead) {
                                 Thread.sleep(20)
                                 continue
                             }
@@ -174,7 +270,7 @@ class SdaModule : Module() {
                             check(result >= 0) { "nativeFeed failed: $result" }
                         }
                         if (!stopped) {
-                            val eofDeadline = System.nanoTime() + 15_000_000_000L
+                            var eofDeadline = System.nanoTime() + 15_000_000_000L
                             synchronized(nativeLock) {
                                 if (generation == workerGeneration && handle == ptr && !stopped) {
                                     val result = SdaEngine.nativeFinish(ptr)
@@ -190,6 +286,11 @@ class SdaModule : Module() {
                                 val consumed = state.getLong("consumedSamplePos")
                                 val remaining = if (decoded > consumed) decoded - consumed else 0L
                                 if (remaining == 0L) break
+                                if (paused) {
+                                    eofDeadline = System.nanoTime() + 15_000_000_000L
+                                    Thread.sleep(20)
+                                    continue
+                                }
                                 check(System.nanoTime() < eofDeadline) { "Timed out waiting for audio drain at EOF" }
                                 Thread.sleep(20)
                             }
@@ -283,7 +384,7 @@ class SdaModule : Module() {
 
         Function("hrtfStatus") { -> hrtfLoadStatus }
 
-        Function("feedError") { -> feedError }
+        Function("feedError") { -> media3Output?.error ?: feedError }
 
         Function("feedDone") { -> feedDone }
 
@@ -302,5 +403,15 @@ class SdaModule : Module() {
                 }
             }
         }
+    }
+
+    private fun renderingSettings(): JSONObject {
+        val context = appContext.reactContext ?: throw RuntimeException("no react context")
+        val preferences = context.getSharedPreferences("sda-rendering", 0)
+        return JSONObject().put("direct", preferences.getBoolean("direct", true))
+            .put("directional", preferences.getBoolean("directional", true))
+            .put("roomId", preferences.getString("roomId", "") ?: "")
+            .put("nearField", preferences.getBoolean("nearField", false))
+            .put("metresPerUnit", preferences.getFloat("metresPerUnit", 1f).toDouble())
     }
 }

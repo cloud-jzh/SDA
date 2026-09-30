@@ -9,6 +9,13 @@ const reactPackage = require.resolve('react/package.json', { paths: [path.dirnam
 const reactRoot = fs.realpathSync.native(path.dirname(reactPackage));
 const config = getDefaultConfig(projectRoot);
 config.resolver.disableHierarchicalLookup = true;
+// Native compilation creates large trees under the watched workspace. They are
+// not JavaScript inputs and can otherwise stall Metro's initial file crawl.
+const defaultBlockList = config.resolver.blockList;
+config.resolver.blockList = [
+  ...(Array.isArray(defaultBlockList) ? defaultBlockList : defaultBlockList ? [defaultBlockList] : []),
+  /[\\/](?:target|\.git|\.gradle|\.cxx)[\\/]/,
+];
 
 config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
 config.resolver.nodeModulesPaths = [

@@ -24,7 +24,9 @@
 //! ```
 //!
 //! Source-id convention (matches the desktop sidecar): dynamic objects are
-//! `obj:{codec object id}`, bed channels are `bed:{channel label}`.
+//! `obj:{codec object id}`, bed channels are `bed:{channel index}`.
+
+mod frame_router;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -48,6 +50,10 @@ pub struct EngineConfig {
     /// Omitted in JSON -> engine default.
     #[serde(default = "default_layout")]
     pub layout: String,
+    #[serde(default)]
+    pub direct_object_hrtf: bool,
+    #[serde(default)]
+    pub directional_hrtf: bool,
 }
 
 fn default_layout() -> String {
@@ -56,7 +62,7 @@ fn default_layout() -> String {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { sample_rate: 48000, output_channels: 2, layout: default_layout() }
+        Self { sample_rate: 48000, output_channels: 2, layout: default_layout(), direct_object_hrtf: false, directional_hrtf: false }
     }
 }
 
@@ -91,6 +97,14 @@ pub struct PlaybackStatus {
     /// Undecoded FrameData batches queued inside the engine.
     pub pending_batches: usize,
     pub paused: bool,
+    pub hrtf_ready: bool,
+    pub hrtf_directions: usize,
+    pub direct_object_hrtf: bool,
+    pub directional_hrtf: bool,
+    pub object_convolver_count: u64,
+    pub continuous_object_count: u64,
+    pub near_field_enabled: bool,
+    pub room_enabled: bool,
 }
 
 /// Latest object snapshot per id (plan T1.10): UI polls at its own cadence
@@ -122,17 +136,30 @@ struct RenderPipeline {
     telemetry: Arc<RuntimeTelemetry>,
 }
 
+/// Mirrors player.ts STARTUP_AHEAD_SECONDS and its startPlaybackIfReady gate.
+#[derive(Default)]
+struct StartupGate {
+    origin: Option<u64>,
+    accepted_end: u64,
+    started: bool,
+    paused: bool,
+    ended: bool,
+}
+
 /// Mobile engine: owns the decoder, the decoded-frame queue and (after
 /// [`MobileEngine::start`]) the renderer worker + FIFO + output handoff.
 pub struct MobileEngine {
     config: EngineConfig,
+    hrtf_directions: usize,
+    announced_codec: Option<String>,
     decoder: StreamingDecoder,
     renderer: Option<Engine>,
     pipeline: Option<RenderPipeline>,
+    startup: Mutex<StartupGate>,
     /// Decoded frames waiting to be handed to the renderer worker.
     pending: Mutex<VecDeque<FrameData>>,
-    /// Sources already declared to the renderer (AddSource is idempotent).
-    declared_sources: Mutex<Vec<String>>,
+    /// Desktop-compatible channel mapping, source lifecycle and event compaction.
+    frame_router: frame_router::FrameRouter,
     /// Codec clock of the newest queued frame (presentation clock base).
     newest_sample_pos: Mutex<u64>,
     /// 66 ms coalescing window for `poll_object_snapshot` (plan T1.10).
@@ -160,9 +187,12 @@ impl MobileEngine {
             renderer: Some(Engine::new(config.sample_rate, config.output_channels)),
             decoder: StreamingDecoder::new("auto")?,
             config,
+            hrtf_directions: 0,
+            announced_codec: None,
             pipeline: None,
+            startup: Mutex::new(StartupGate::default()),
             pending: Mutex::new(VecDeque::new()),
-            declared_sources: Mutex::new(Vec::new()),
+            frame_router: frame_router::FrameRouter::default(),
             newest_sample_pos: Mutex::new(0),
             last_poll: Mutex::new(None),
             object_events: Mutex::new(VecDeque::new()),
@@ -181,12 +211,17 @@ impl MobileEngine {
         if self.pipeline.is_some() {
             return Err("engine already started".into());
         }
+        if (self.config.direct_object_hrtf || self.config.directional_hrtf) && self.hrtf_directions == 0 {
+            return Err("object rendering requires a loaded HRTF set".into());
+        }
         let Some(mut renderer) = self.renderer.take() else {
             return Err("renderer engine unavailable".into());
         };
-        // The desktop sidecar flips these via protocol commands; a mobile
-        // engine starts rendering as soon as start() succeeds.
-        renderer.set_output_active(true);
+        // With calibrated assets, keep the same paused startup gate as the
+        // desktop: declare sources and prebuffer PCM before StartAt.
+        let gated = self.hrtf_directions > 0;
+        renderer.set_output_active(!gated);
+        *self.startup.lock().expect("startup lock") = StartupGate { started: !gated, ..Default::default() };
         let commands = Arc::new(render_command::RenderCommandQueue::new(256));
         let fifo = Arc::new(stereo_fifo::StereoFifo::new(
             sda_native_renderer::STEREO_FIFO_CAPACITY_FRAMES,
@@ -200,11 +235,18 @@ impl MobileEngine {
         );
         // Engine::new starts paused; unpause through the command path the
         // worker owns (mirrors the desktop Play flow).
-        let _ = commands
-            .push(render_command::RenderCommand::Command(Command::Pause { paused: false }));
+        if !gated {
+            let _ = commands.push(render_command::RenderCommand::Command(Command::Pause { paused: false }));
+        }
         // Apply the requested virtual-speaker layout before PCM is submitted.
         let _ = commands.push(render_command::RenderCommand::Command(
             Command::SetLayout { layout: self.config.layout.clone() },
+        ));
+        let _ = commands.push(render_command::RenderCommand::Command(
+            Command::SetDirectionalHrtf { enabled: self.config.directional_hrtf },
+        ));
+        let _ = commands.push(render_command::RenderCommand::Command(
+            Command::SetObjectHrtf { enabled: self.config.direct_object_hrtf },
         ));
         self.pipeline = Some(RenderPipeline { fifo: fifo.clone(), commands: commands.clone(), telemetry: telemetry.clone() });
         self.drain_pending_into_pipeline()?;
@@ -229,9 +271,11 @@ impl MobileEngine {
         let path = std::path::Path::new(hrtf_json_path);
         let set = sda_native_renderer::hrtf::NativeHrtfSet::load_calibrated(path)
             .map_err(|error| format!("HRTF load failed: {error}"))?;
+        let directions = set.simulation_shape().0;
         renderer
-            .replace_hrtf(set, 0.0)
+            .replace_hrtf(set, 0.04)
             .map_err(|error| format!("HRTF apply failed: {error}"))?;
+        self.hrtf_directions = directions;
         Ok(())
     }
 
@@ -240,6 +284,15 @@ impl MobileEngine {
     /// pipeline is started; before that they queue (visualizer-only use).
     pub fn feed(&mut self, data: &[u8]) -> EngineResult<DecodeStatus> {
         self.decoder.push(data)?;
+        let codec = self.decoder.codec_name().to_string();
+        if self.announced_codec.as_ref() != Some(&codec) && codec != "auto" && !codec.is_empty() {
+            if let Some(pipeline) = &self.pipeline {
+                pipeline.commands.push(render_command::RenderCommand::Command(
+                    Command::SetProgramCodec { codec: codec.clone() },
+                )).map_err(|_| "codec command queue full")?;
+                self.announced_codec = Some(codec);
+            }
+        }
         let mut frames_pushed = 0_u32;
         let mut sample_pos = self.decoded_sample_pos();
         {
@@ -272,7 +325,10 @@ impl MobileEngine {
 
     pub fn finish(&mut self) -> EngineResult<DecodeStatus> {
         self.decoder.flush();
-        self.feed(&[])
+        let status = self.feed(&[])?;
+        self.startup.lock().expect("startup lock").ended = true;
+        self.start_playback_if_ready()?;
+        Ok(status)
     }
 
     /// Codec clock of the newest decoded frame (samples @ config.sample_rate).
@@ -303,6 +359,14 @@ impl MobileEngine {
             fifo_frames,
             pending_batches: pending_len,
             paused,
+            hrtf_ready: self.pipeline.as_ref().map_or(self.hrtf_directions > 0, |p| p.telemetry.hrtf_ready.load(std::sync::atomic::Ordering::Acquire)),
+            hrtf_directions: self.hrtf_directions,
+            direct_object_hrtf: self.pipeline.as_ref().is_some_and(|p| p.telemetry.direct_object_hrtf.load(std::sync::atomic::Ordering::Acquire)),
+            directional_hrtf: self.pipeline.as_ref().is_some_and(|p| p.telemetry.directional_hrtf.load(std::sync::atomic::Ordering::Acquire)),
+            object_convolver_count: self.pipeline.as_ref().map_or(0, |p| p.telemetry.object_convolver_count.load(std::sync::atomic::Ordering::Acquire)),
+            continuous_object_count: self.pipeline.as_ref().map_or(0, |p| p.telemetry.continuous_object_count.load(std::sync::atomic::Ordering::Acquire)),
+            near_field_enabled: self.pipeline.as_ref().is_some_and(|p| p.telemetry.near_field_enabled.load(std::sync::atomic::Ordering::Acquire)),
+            room_enabled: self.pipeline.as_ref().is_some_and(|p| p.telemetry.room_enabled.load(std::sync::atomic::Ordering::Acquire)),
         }
     }
 
@@ -311,13 +375,17 @@ impl MobileEngine {
     /// `feed()` starts the new time base. Object-event coalescing resets.
     pub fn seek(&mut self, _position_ms: u64) -> EngineResult<()> {
         self.decoder.reset();
+        self.announced_codec = None;
         self.pending.lock().expect("pending lock").clear();
         *self.newest_sample_pos.lock().expect("clock lock") = 0;
         *self.last_poll.lock().expect("poll lock") = None;
         self.object_events.lock().expect("object events lock").clear();
         self.active_objects.lock().expect("active objects lock").clear();
-        self.declared_sources.lock().expect("sources lock").clear();
+        self.frame_router = frame_router::FrameRouter::default();
+        *self.startup.lock().expect("startup lock") = StartupGate::default();
         if let Some(pipeline) = &self.pipeline {
+            pipeline.commands.push(render_command::RenderCommand::Command(Command::Reset { origin: 0 }))
+                .map_err(|_| "render command queue full")?;
             // Invalidate the rendered FIFO: epoch flush consumed by the
             // output callback, mirroring the desktop seek path.
             let _epoch = pipeline.fifo.clear_from_producer();
@@ -339,6 +407,48 @@ impl MobileEngine {
             .map_err(|_| "command queue full".into())
     }
 
+    pub fn set_object_rendering(&self, direct: bool, directional: bool) -> EngineResult<()> {
+        if (direct || directional) && self.hrtf_directions == 0 {
+            return Err("object rendering requires a loaded HRTF set".into());
+        }
+        let pipeline = self.pipeline.as_ref().ok_or("engine not started")?;
+        pipeline.commands.push(render_command::RenderCommand::ObjectRendering { direct, directional })
+            .map_err(|_| "render command queue full".into())
+    }
+
+    /// Apply the desktop near-field correction with the same distance mapping.
+    pub fn set_near_field(&mut self, enabled: bool, metres_per_unit: f32) -> EngineResult<()> {
+        let settings = sda_native_renderer::near_field::Settings { enabled, metres_per_unit };
+        if !settings.valid() { return Err("invalid near-field distance mapping".into()); }
+        if let Some(pipeline) = &self.pipeline {
+            let (reply, received) = std::sync::mpsc::channel();
+            pipeline.commands.push(render_command::RenderCommand::NearField { settings, reply })
+                .map_err(|_| "near-field command queue is full")?;
+            received.recv_timeout(Duration::from_secs(10)).map_err(|_| "near-field acknowledgement timed out".to_string())?
+        } else {
+            self.renderer.as_mut().ok_or("renderer unavailable")?.configure_near_field(settings)
+        }
+    }
+
+    /// Use the exact desktop room graph, with an acknowledged live switch.
+    /// An empty path bypasses the room; asset parsing runs on the calling thread.
+    pub fn set_room(&mut self, path: &str) -> EngineResult<()> {
+        let profile = if path.is_empty() { None } else {
+            let room = sda_native_renderer::cinema::RoomProfile::load(path)?;
+            if room.layout != self.config.layout { return Err("room layout does not match playback layout".into()); }
+            Some(Arc::new(room))
+        };
+        let settings = sda_native_renderer::cinema::Settings { enabled: profile.is_some(), ..Default::default() };
+        if let Some(pipeline) = &self.pipeline {
+            let (reply, received) = std::sync::mpsc::channel();
+            pipeline.commands.push(render_command::RenderCommand::Room { settings, profile, reply })
+                .map_err(|_| "room command queue is full")?;
+            received.recv_timeout(Duration::from_secs(30)).map_err(|_| "room renderer acknowledgement timed out".to_string())?
+        } else {
+            self.renderer.as_mut().ok_or("renderer unavailable")?.configure_room(settings, profile)
+        }
+    }
+
     pub fn stop(&mut self) {
         if let Some(pipeline) = self.pipeline.take() {
             pipeline.telemetry.shutdown_requested.store(true, std::sync::atomic::Ordering::Release);
@@ -350,10 +460,18 @@ impl MobileEngine {
         *self.last_poll.lock().expect("poll lock") = None;
     }
 
-    pub fn set_paused(&mut self, paused: bool) -> EngineResult<()> {
+    pub fn set_paused(&self, paused: bool) -> EngineResult<()> {
         let Some(pipeline) = &self.pipeline else {
             return Err("engine not started".into());
         };
+        {
+            let mut startup = self.startup.lock().expect("startup lock");
+            startup.paused = paused;
+            if !startup.started {
+                drop(startup);
+                return self.start_playback_if_ready();
+            }
+        }
         pipeline
             .commands
             .push(render_command::RenderCommand::Command(Command::Pause { paused }))
@@ -389,6 +507,7 @@ impl MobileEngine {
         if !degrees.is_finite() || !(-180.0..=180.0).contains(&degrees) {
             return Err("head yaw must be finite and between -180 and 180 degrees".into());
         }
+        if degrees == 0.0 { return self.reset_head_pose(); }
         let pipeline = self.pipeline.as_ref().ok_or("engine not started")?;
         let half = degrees.to_radians() * 0.5;
         let orientation = [0.0, 0.0, half.sin(), half.cos()];
@@ -420,40 +539,49 @@ impl MobileEngine {
         let Some(pipeline) = &self.pipeline else { return Ok(()) };
         let mut pending = self.pending.lock().expect("pending lock");
         while let Some(frame) = pending.pop_front() {
-            for label in &frame.labels {
-                let mut declared = self.declared_sources.lock().expect("sources lock");
-                if !declared.iter().any(|existing| existing == label) {
-                    let id = source_id(label);
-                    let bed_label = (!label.starts_with("Obj_")).then(|| label.to_string());
-                    pipeline.commands.push(
-                        render_command::RenderCommand::Command(Command::AddSource {
-                            id,
-                            at: None,
-                            bed_label,
-                        }),
-                    ).map_err(|_| "source declaration queue is full")?;
-                    declared.push(label.clone());
+            let origin = frame.sample_pos;
+            let end = origin + frame.channels.first().map_or(0, Vec::len) as u64;
+            for command in self.frame_router.route(frame)? {
+                // The unconfigured reference-mix utility is not a calibrated
+                // playback session and does not advance the source-ring clock.
+                if self.hrtf_directions == 0 {
+                    pipeline.commands.push(command).map_err(|_| "render command queue full")?;
+                    continue;
+                }
+                if let render_command::RenderCommand::PcmFrame { start, entries, events } = command {
+                    let (reply, received) = std::sync::mpsc::channel();
+                    pipeline.commands.push(render_command::RenderCommand::PcmFrameWithAck { start, entries, events, reply })
+                        .map_err(|_| "render command queue is full; feed must be paced")?;
+                    let accepted = received.recv_timeout(Duration::from_secs(10))
+                        .map_err(|_| "desktop PCM frame acknowledgement timed out")?;
+                    if !accepted { return Err(format!("desktop renderer rejected PCM frame at {start}")); }
+                } else {
+                    pipeline.commands.push(command)
+                        .map_err(|_| "render command queue is full; feed must be paced")?;
                 }
             }
-            let entries: Vec<(String, Vec<f32>)> = frame
-                .labels
-                .iter()
-                .map(|label| source_id(label))
-                .zip(frame.channels.iter().cloned())
-                .collect();
-            let events: Vec<NativeObjectEvent> = frame
-                .events
-                .iter()
-                .map(native_object_event)
-                .collect();
-            pipeline.commands.push(
-                render_command::RenderCommand::PcmFrame {
-                    start: frame.sample_pos,
-                    entries,
-                    events,
-                },
-            ).map_err(|_| "PCM command queue is full; feed must be paced")?;
+            {
+                let mut startup = self.startup.lock().expect("startup lock");
+                startup.origin.get_or_insert(origin);
+                startup.accepted_end = end;
+            }
+            self.start_playback_if_ready()?;
         }
+        Ok(())
+    }
+
+    fn start_playback_if_ready(&self) -> EngineResult<()> {
+        let Some(pipeline) = &self.pipeline else { return Ok(()) };
+        let mut startup = self.startup.lock().expect("startup lock");
+        let Some(origin) = startup.origin else { return Ok(()) };
+        if startup.started || startup.paused { return Ok(()) }
+        if !startup.ended && startup.accepted_end.saturating_sub(origin) < u64::from(self.config.sample_rate) / 2 {
+            return Ok(());
+        }
+        // This command follows the complete PCM/event batches on the same FIFO.
+        pipeline.commands.push(render_command::RenderCommand::Command(Command::StartAt { origin }))
+            .map_err(|_| "render command queue full at startup")?;
+        startup.started = true;
         Ok(())
     }
 
@@ -470,36 +598,147 @@ impl Drop for MobileEngine {
     }
 }
 
-/// Map a codec channel label to the renderer's source-id convention.
-fn source_id(label: &str) -> String {
-    match label.strip_prefix("Obj_") {
-        Some(numeric) => format!("obj:{numeric}"),
-        None => format!("bed:{label}"),
-    }
-}
-
 /// sda_core::ObjectEvent → renderer NativeObjectEvent (camelCase contract on
 /// both sides; zone/diffuse extras default like the web bridge).
-fn native_object_event(event: &ObjectEvent) -> NativeObjectEvent {
-    NativeObjectEvent::from_decoder_contract(
-        event.id,
-        event.sample_pos,
-        event.has_pos,
-        [event.pos[0] as f32, event.pos[1] as f32, event.pos[2] as f32],
-        event.gain_db as f32,
-        [event.size[0] as f32, event.size[1] as f32, event.size[2] as f32],
-        event.distance_m.map(|d| d as f32),
-        event.distance_infinite,
-        event.ramp_duration,
-    )
+fn native_object_event(event: &ObjectEvent) -> EngineResult<NativeObjectEvent> {
+    // Use the desktop sidecar's serde wire contract, including nullable distance
+    // and float parsing, rather than a second handwritten field conversion.
+    let json = serde_json::to_vec(event).map_err(|error| error.to_string())?;
+    serde_json::from_slice(&json).map_err(|error| format!("desktop object metadata contract: {error}"))
 }
 
 #[cfg(target_os = "android")]
 pub mod jni;
 
+#[cfg(target_os = "android")]
+mod media3_output;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_startup_waits_for_all_batches_and_respects_pause_and_short_eof() {
+        let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        let commands = Arc::new(render_command::RenderCommandQueue::new(32));
+        engine.pipeline = Some(RenderPipeline {
+            commands: commands.clone(), fifo: Arc::new(stereo_fifo::StereoFifo::new(4096)),
+            telemetry: Arc::new(RuntimeTelemetry::default()),
+        });
+        let queue_frame = |engine: &mut MobileEngine, at, count| {
+            let frame = FrameData {
+                codec: "eac3", sample_rate: 48000, sample_pos: at,
+                channels: vec![vec![0.0; count]], labels: vec!["Obj_42".into()],
+                raw_bed_labels: vec![], events: vec![], object_channels: vec![],
+                program_loudness: None, ramp_duration: 128,
+            };
+            for command in engine.frame_router.route(frame).unwrap() {
+                assert!(commands.push(command).is_ok());
+            }
+            {
+                let mut startup = engine.startup.lock().unwrap();
+                startup.origin.get_or_insert(at);
+                startup.accepted_end = at + count as u64;
+            }
+            engine.start_playback_if_ready().unwrap();
+        };
+        queue_frame(&mut engine, 0, 12000);
+        assert!(!engine.startup.lock().unwrap().started);
+        assert_eq!(commands.pending_len_for_debug(), 2, "declaration and first PCM batch only");
+        engine.set_paused(true).unwrap();
+        queue_frame(&mut engine, 12000, 12000);
+        assert!(!engine.startup.lock().unwrap().started);
+        assert_eq!(commands.pending_len_for_debug(), 3, "paused startup must not enqueue StartAt");
+        engine.set_paused(false).unwrap();
+        assert_eq!(commands.pending_len_for_debug(), 4, "StartAt follows both PCM batches");
+        assert!(engine.startup.lock().unwrap().started);
+        engine.start_playback_if_ready().unwrap();
+        assert_eq!(commands.pending_len_for_debug(), 4, "start must be sent exactly once");
+
+        *engine.startup.lock().unwrap() = StartupGate::default();
+        queue_frame(&mut engine, 24000, 1000);
+        assert!(!engine.startup.lock().unwrap().started);
+        engine.finish().unwrap();
+        assert!(engine.startup.lock().unwrap().started, "short files must drain at EOF");
+        assert_eq!(engine.startup.lock().unwrap().origin, Some(24000));
+        assert_eq!(commands.pending_len_for_debug(), 6);
+    }
+
+    struct MobileTestOutput;
+
+    impl AudioOutput for MobileTestOutput {
+        fn run(self: Arc<Self>, fifo: Arc<stereo_fifo::StereoFifo>, telemetry: Arc<RuntimeTelemetry>,
+            _commands: Arc<render_command::RenderCommandQueue>) {
+            let mut block = [0.0; 2048];
+            while !telemetry.shutdown_requested.load(std::sync::atomic::Ordering::Acquire) {
+                fifo.apply_flush_from_consumer();
+                let count = fifo.pop_into_f32(&mut block, 2);
+                telemetry.callback_consumed_sample_pos.fetch_add(count as u64, std::sync::atomic::Ordering::Release);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    fn wait_mobile_status(engine: &MobileEngine, predicate: impl Fn(&PlaybackStatus) -> bool) -> PlaybackStatus {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = engine.playback_status();
+            if predicate(&status) { return status; }
+            assert!(Instant::now() < deadline, "renderer did not apply state: {status:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn mobile_object_rendering_requires_hrtf() {
+        let mut engine = MobileEngine::new(EngineConfig { direct_object_hrtf: true,
+            directional_hrtf: true, ..EngineConfig::default() }, None).unwrap();
+        assert!(engine.start(Arc::new(MobileTestOutput)).unwrap_err().contains("HRTF"));
+    }
+
+    #[test]
+    fn mobile_near_field_acknowledges_applied_state_and_rejects_invalid_scale() {
+        let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
+        engine.load_hrtf(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/mobile/android/app/src/main/assets/hrtf-dense/hrtf-set.json")).unwrap();
+        engine.start(Arc::new(MobileTestOutput)).unwrap();
+        engine.set_near_field(true, 1.0).unwrap();
+        assert!(engine.playback_status().near_field_enabled);
+        assert!(!engine.playback_status().direct_object_hrtf);
+        for invalid in [f32::NAN, 0.1, 4.1] {
+            assert!(engine.set_near_field(false, invalid).is_err());
+            assert!(engine.playback_status().near_field_enabled);
+        }
+        engine.set_near_field(false, 0.5).unwrap();
+        assert!(!engine.playback_status().near_field_enabled);
+        engine.stop();
+    }
+
+    #[test]
+    fn mobile_object_rendering_applies_desktop_modes() {
+        let mut engine = MobileEngine::new(EngineConfig { direct_object_hrtf: true,
+            directional_hrtf: true, ..EngineConfig::default() }, None).unwrap();
+        engine.load_hrtf(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/mobile/android/app/src/main/assets/hrtf-dense/hrtf-set.json")).unwrap();
+        engine.start(Arc::new(MobileTestOutput)).unwrap();
+        let sample = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/mobile/android/app/src/main/assets/joc_atmos_1s.eac3")).unwrap();
+        engine.feed(&sample).unwrap();
+        let status = wait_mobile_status(&engine, |s| s.directional_hrtf && s.continuous_object_count > 0);
+        assert!(status.hrtf_ready);
+        assert!(status.direct_object_hrtf);
+        assert_eq!(status.hrtf_directions, 61);
+        assert!(status.object_convolver_count >= status.continuous_object_count);
+        engine.set_object_rendering(false, false).unwrap();
+        wait_mobile_status(&engine, |s| !s.direct_object_hrtf && !s.directional_hrtf && s.object_convolver_count == 0);
+        engine.set_object_rendering(true, false).unwrap();
+        engine.feed(&sample).unwrap();
+        wait_mobile_status(&engine, |s| s.direct_object_hrtf && !s.directional_hrtf && s.object_convolver_count > 0);
+        engine.set_object_rendering(false, true).unwrap();
+        engine.feed(&sample).unwrap();
+        wait_mobile_status(&engine, |s| !s.direct_object_hrtf && s.directional_hrtf && s.continuous_object_count > 0);
+        engine.stop();
+    }
 
     /// Decode-only dump of song.eac3 (no render pipeline): writes the raw
     /// decoder output (all bed channels, 6ch WAV) so decode correctness can
@@ -570,7 +809,7 @@ mod tests {
             let end = (fed + chunk).min(bytes.len());
             engine.feed(&bytes[fed..end]).unwrap();
             fed = end;
-            while engine.playback_status().fifo_frames > 12000 {
+            while engine.decoded_sample_pos().saturating_sub(engine.playback_status().consumed_sample_pos) > 48000 {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
         }
@@ -741,7 +980,7 @@ mod tests {
     #[test]
     fn rejects_non_stereo_output() {
         let error = match MobileEngine::new(
-            EngineConfig { sample_rate: 48000, output_channels: 6, layout: "7.1.4".into() },
+            EngineConfig { output_channels: 6, ..EngineConfig::default() },
             None,
         ) {
             Err(error) => error,

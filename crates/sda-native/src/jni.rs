@@ -9,7 +9,7 @@ use jni::JNIEnv;
 
 use crate::{EngineConfig, MobileEngine};
 
-fn android_log(message: &str) {
+pub(crate) fn android_log(message: &str) {
     extern "C" {
         fn __android_log_write(prio: i32, tag: *const u8, text: *const u8) -> i32;
     }
@@ -26,6 +26,40 @@ fn take_engine(ptr: jlong) -> Option<&'static mut MobileEngine> {
         None
     } else {
         Some(unsafe { &mut *(ptr as *mut MobileEngine) })
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeSetRoom(
+    mut env: JNIEnv, _class: JClass, ptr: jlong, path: JString,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<(), String> {
+        let path: String = env.get_string(&path).map_err(|e| e.to_string())?.into();
+        take_engine(ptr).ok_or("engine unavailable")?.set_room(&path)
+    })();
+    env.new_string(result.err().unwrap_or_default()).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeSetNearField(
+    env: JNIEnv, _class: JClass, ptr: jlong, enabled: jni::sys::jboolean, scale: jni::sys::jfloat,
+) -> jni::sys::jstring {
+    let result = take_engine(ptr).ok_or("engine unavailable".to_string())
+        .and_then(|engine| engine.set_near_field(enabled != 0, scale));
+    env.new_string(result.err().unwrap_or_default()).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeSetObjectRendering(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+    direct: jni::sys::jboolean,
+    directional: jni::sys::jboolean,
+) -> jint {
+    match take_engine(ptr) {
+        Some(engine) => engine.set_object_rendering(direct != 0, directional != 0).map(|_| 0).unwrap_or(-1),
+        None => -2,
     }
 }
 
@@ -134,12 +168,14 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeResetHeadPose(
 /// `nativeStart(ptr: Long): Int` — 0 on success.
 #[no_mangle]
 pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeStart(
-    _env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     ptr: jlong,
+    output: jni::objects::JObject,
 ) -> jint {
+    let (Ok(vm), Ok(output)) = (env.get_java_vm(), env.new_global_ref(output)) else { return -3; };
     match take_engine(ptr) {
-        Some(engine) => match engine.start_android() {
+        Some(engine) => match engine.start(std::sync::Arc::new(crate::media3_output::Media3Output { vm, output })) {
             Ok(()) => 0,
             Err(_) => -1,
         },

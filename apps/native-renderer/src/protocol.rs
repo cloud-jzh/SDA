@@ -369,19 +369,7 @@ fn handle_command(
             });
         }
         Command::SetNearField { settings } => {
-            let result = if !settings.valid() {
-                Err("invalid near-field settings".to_string())
-            } else if settings.enabled && state.active_hrtf_set.is_some() {
-                let preference = state.direct_objects;
-                let result = state.set_direct_objects(true);
-                state.direct_objects = preference;
-                result
-            } else {
-                Ok(())
-            };
-            if result.is_ok() {
-                state.near_field = settings;
-            }
+            let result = state.configure_near_field(settings);
             write_event(&Event::Ack {
                 command: "setNearField",
                 accepted: result.is_ok(),
@@ -405,51 +393,8 @@ fn handle_command(
             });
         }
         Command::SetCinema { settings, profile } => {
-            let result = (|| -> Result<(), String> {
-                settings.validate()?;
-                let room = profile
-                    .as_deref()
-                    .map(cinema::RoomProfile::load)
-                    .transpose()?
-                    .map(Arc::new);
-                // Build on a clone first so invalid assets cannot damage the active graph.
-                let mut candidate = state.active_hrtf_set.clone().ok_or("HRTF is not ready")?;
-                candidate.configure_cinema(settings.clone(), room.clone());
-                let bus =
-                    bus_renderer::BusRenderer::new(&candidate, &state.vbap, state.hrtf_wet_weight)?;
-                state.cinema = settings;
-                state.hardware_lfe = crate::hardware::Chain::new(&state.cinema.monitor.hardware);
-                state.hardware_stereo = std::array::from_fn(|_| {
-                    crate::hardware::Chain::new(&state.cinema.monitor.hardware)
-                });
-                let sub_delay = (if state.cinema.enabled {
-                    state
-                        .cinema
-                        .speakers
-                        .get("LFE")
-                        .map_or(0, |s| (s.delay_ms * 48.0).round() as usize)
-                } else {
-                    0
-                }) + state.cinema.monitor.delay("LFE");
-                state.cinema_sub_delay = vec![0.0; sub_delay];
-                state.cinema_sub_cursor = 0;
-                state.cinema_bass_delay.fill(0.0);
-                state.room_profile = room;
-                state.active_hrtf_set = Some(candidate);
-                state.bus_renderer = Some(bus);
-                state.stereo_dry_bus = None;
-                for source in state.sources.values_mut() {
-                    source.direct = None;
-                    source.continuous = None;
-                    source.continuous_mix = 0.0;
-                    source.bass_split = None;
-                }
-                state.direct_mix = 0.0;
-                if !remote_sync::ENABLED.load(Ordering::Acquire) {
-                    state.render_epoch = state.render_epoch.wrapping_add(1);
-                }
-                Ok(())
-            })();
+            let result = profile.as_deref().map(cinema::RoomProfile::load).transpose()
+                .and_then(|room| state.configure_room(settings, room.map(Arc::new)));
             write_event(&Event::Ack {
                 command: "setCinema",
                 accepted: result.is_ok(),
@@ -790,6 +735,7 @@ fn handle_command(
             return false;
         }
     }
+    telemetry.publish_rendering_state(state);
     true
 }
 
@@ -803,6 +749,22 @@ pub(super) fn apply_render_command(
         render_command::RenderCommand::Command(command) => {
             handle_command(state, command, fifo, telemetry)
         }
+        render_command::RenderCommand::ObjectRendering { direct, directional } => {
+            handle_command(state, Command::SetDirectionalHrtf { enabled: directional }, fifo, telemetry);
+            handle_command(state, Command::SetObjectHrtf { enabled: direct }, fifo, telemetry)
+        }
+        render_command::RenderCommand::Room { settings, profile, reply } => {
+            let result = state.configure_room(settings, profile);
+            telemetry.publish_rendering_state(state);
+            let _ = reply.send(result);
+            true
+        }
+        render_command::RenderCommand::NearField { settings, reply } => {
+            let result = state.configure_near_field(settings);
+            telemetry.publish_rendering_state(state);
+            let _ = reply.send(result);
+            true
+        }
         render_command::RenderCommand::Pcm { id, start, samples } => {
             ingest_pcm(state, &id, start, samples);
             true
@@ -811,77 +773,13 @@ pub(super) fn apply_render_command(
             ingest_pcm_batch(state, start, entries);
             true
         }
-        render_command::RenderCommand::PcmFrame {
-            start,
-            entries,
-            events,
-        } => {
-            let samples = entries.first().map_or(0, |(_, pcm)| pcm.len());
-            // Validate the entire transaction before changing metadata or PCM.
-            let valid = events.len() <= 4096
-                && events
-                    .iter()
-                    .all(|event| event.zone_exclusion.iter().all(|zone| zone.valid()))
-                && !entries.is_empty()
-                && entries.len() <= MAX_SOURCES
-                && samples > 0
-                && entries.iter().all(|(id, pcm)| {
-                    pcm.len() == samples
-                        && pcm.iter().all(|v| v.is_finite())
-                        && state.sources.get(id).is_some_and(|source| {
-                            source.samples.can_write(state.sample_pos, start, pcm.len())
-                        })
-                });
-            if !valid {
-                let keys: Vec<String> = state.sources.keys().take(4).cloned().collect();
-                eprintln!(
-                    "batchAckState total={} keys={:?} want={:?}",
-                    state.sources.len(),
-                    keys,
-                    entries.first().map(|(id, _)| id.clone()),
-                );
-                let reason = if events.len() > 4096 {
-                    "events>4096"
-                } else if let Some(event) = events.iter().find(|event| !event.zone_exclusion.iter().all(|zone| zone.valid())) {
-                    "invalid zone"
-                } else if entries.is_empty() {
-                    "empty entries"
-                } else if entries.len() > MAX_SOURCES {
-                    "too many entries"
-                } else if samples == 0 {
-                    "zero samples"
-                } else {
-                    let mut detail = "ring/can_write";
-                    for (id, pcm) in &entries {
-                        if pcm.len() != samples {
-                            detail = "len mismatch";
-                            break;
-                        }
-                        if pcm.iter().any(|v| !v.is_finite()) {
-                            detail = "non-finite";
-                            break;
-                        }
-                        if state.sources.get(id).is_none() {
-                            detail = "unknown source";
-                            break;
-                        }
-                    }
-                    eprintln!("batchAckReject start={start} detail={detail}");
-                    detail
-                };
-                write_event(&Event::BatchAck {
-                    start,
-                    samples: samples as u32,
-                    accepted: false,
-                    detail: Some(&reason),
-                });
-            } else {
-                // Do not reapply metadata when acknowledging a completed replay.
-                if start.saturating_add(samples as u64) > state.sample_pos {
-                    apply_object_events(state, events);
-                }
-                ingest_pcm_batch(state, start, entries);
-            }
+        render_command::RenderCommand::PcmFrame { start, entries, events } => {
+            accept_pcm_frame(state, start, entries, events);
+            true
+        }
+        render_command::RenderCommand::PcmFrameWithAck { start, entries, events, reply } => {
+            let accepted = accept_pcm_frame(state, start, entries, events);
+            let _ = reply.send(accepted);
             true
         }
         render_command::RenderCommand::HeadphoneFir {
@@ -992,6 +890,77 @@ fn apply_object_event(source: &mut Source, sample_pos: u64, event: NativeObjectE
             };
         }
     }
+}
+
+// Both desktop IPC and mobile submission use this exact validation/commit path.
+fn accept_pcm_frame(state: &mut Engine, start: u64, entries: Vec<(String, Vec<f32>)>, events: Vec<NativeObjectEvent>) -> bool {
+    let samples = entries.first().map_or(0, |(_, pcm)| pcm.len());
+    // Validate the entire transaction before changing metadata or PCM.
+    let valid = events.len() <= 4096
+        && events
+            .iter()
+            .all(|event| event.zone_exclusion.iter().all(|zone| zone.valid()))
+        && !entries.is_empty()
+        && entries.len() <= MAX_SOURCES
+        && samples > 0
+        && entries.iter().all(|(id, pcm)| {
+            pcm.len() == samples
+                && pcm.iter().all(|v| v.is_finite())
+                && state.sources.get(id).is_some_and(|source| {
+                    source.samples.can_write(state.sample_pos, start, pcm.len())
+                })
+        });
+    if !valid {
+        let keys: Vec<String> = state.sources.keys().take(4).cloned().collect();
+        eprintln!(
+            "batchAckState total={} keys={:?} want={:?}",
+            state.sources.len(),
+            keys,
+            entries.first().map(|(id, _)| id.clone()),
+        );
+        let reason = if events.len() > 4096 {
+            "events>4096"
+        } else if let Some(event) = events.iter().find(|event| !event.zone_exclusion.iter().all(|zone| zone.valid())) {
+            "invalid zone"
+        } else if entries.is_empty() {
+            "empty entries"
+        } else if entries.len() > MAX_SOURCES {
+            "too many entries"
+        } else if samples == 0 {
+            "zero samples"
+        } else {
+            let mut detail = "ring/can_write";
+            for (id, pcm) in &entries {
+                if pcm.len() != samples {
+                    detail = "len mismatch";
+                    break;
+                }
+                if pcm.iter().any(|v| !v.is_finite()) {
+                    detail = "non-finite";
+                    break;
+                }
+                if state.sources.get(id).is_none() {
+                    detail = "unknown source";
+                    break;
+                }
+            }
+            eprintln!("batchAckReject start={start} detail={detail}");
+            detail
+        };
+        write_event(&Event::BatchAck {
+            start,
+            samples: samples as u32,
+            accepted: false,
+            detail: Some(&reason),
+        });
+    } else {
+        // Do not reapply metadata when acknowledging a completed replay.
+        if start.saturating_add(samples as u64) > state.sample_pos {
+            apply_object_events(state, events);
+        }
+        ingest_pcm_batch(state, start, entries);
+    }
+    valid
 }
 
 fn ingest_pcm_batch(state: &mut Engine, start: u64, entries: Vec<(String, Vec<f32>)>) {
@@ -1910,5 +1879,89 @@ mod near_field_tests {
         );
         assert!(e.near_field.enabled);
         assert_eq!(e.near_field.metres_per_unit, 0.5);
+    }
+}
+
+#[cfg(test)]
+mod mobile_frame_ack_tests {
+    use super::*;
+
+    #[test]
+    fn mobile_ack_validates_the_whole_desktop_transaction_before_metadata_changes() {
+        let mut engine = Engine::new(48000, 2);
+        let fifo = crate::stereo_fifo::StereoFifo::new(4096);
+        let telemetry = RuntimeTelemetry::default();
+        handle_command(&mut engine, Command::AddSource { id: "obj:42".into(), at: Some(0), bed_label: None }, &fifo, &telemetry);
+        let original = engine.sources["obj:42"].position;
+        for accepted in [false, true] {
+            let (reply, received) = std::sync::mpsc::channel();
+            let id = if accepted { "obj:42" } else { "obj:missing" };
+            let event = NativeObjectEvent::from_decoder_contract(42, 0, true,
+                [0.25, -0.5, 0.0], -6.0, [0.0;3], Some(0.35), false, 128);
+            assert!(apply_render_command(&mut engine, render_command::RenderCommand::PcmFrameWithAck {
+                start: 0, entries: vec![(id.into(), vec![0.25; 1536])], events: vec![event], reply,
+            }, &fifo, &telemetry));
+            assert_eq!(received.recv().unwrap(), accepted);
+            if !accepted { assert_eq!(engine.sources["obj:42"].position, original); }
+            assert_eq!(engine.pcm_coverage.available(0, 1536), if accepted {1536} else {0});
+        }
+    }
+}
+
+// Shared by the desktop protocol and mobile commands; retain one room DSP graph.
+impl Engine {
+    pub fn configure_room(&mut self, settings: cinema::Settings, room: Option<Arc<cinema::RoomProfile>>) -> Result<(), String> {
+        settings.validate()?;
+        // Build on a clone first so invalid assets cannot damage the active graph.
+        let mut candidate = self.active_hrtf_set.clone().ok_or("HRTF is not ready")?;
+        candidate.configure_cinema(settings.clone(), room.clone());
+        let bus =
+            bus_renderer::BusRenderer::new(&candidate, &self.vbap, self.hrtf_wet_weight)?;
+        self.cinema = settings;
+        self.hardware_lfe = crate::hardware::Chain::new(&self.cinema.monitor.hardware);
+        self.hardware_stereo = std::array::from_fn(|_| {
+            crate::hardware::Chain::new(&self.cinema.monitor.hardware)
+        });
+        let sub_delay = (if self.cinema.enabled {
+            self
+                .cinema
+                .speakers
+                .get("LFE")
+                .map_or(0, |s| (s.delay_ms * 48.0).round() as usize)
+        } else {
+            0
+        }) + self.cinema.monitor.delay("LFE");
+        self.cinema_sub_delay = vec![0.0; sub_delay];
+        self.cinema_sub_cursor = 0;
+        self.cinema_bass_delay.fill(0.0);
+        self.room_profile = room;
+        self.active_hrtf_set = Some(candidate);
+        self.bus_renderer = Some(bus);
+        self.stereo_dry_bus = None;
+        for source in self.sources.values_mut() {
+            source.direct = None;
+            source.continuous = None;
+            source.continuous_mix = 0.0;
+            source.bass_split = None;
+        }
+        self.direct_mix = 0.0;
+        if !remote_sync::ENABLED.load(Ordering::Acquire) {
+            self.render_epoch = self.render_epoch.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
+
+impl Engine {
+    pub fn configure_near_field(&mut self, settings: crate::near_field::Settings) -> Result<(), String> {
+        if !settings.valid() { return Err("invalid near-field settings".into()); }
+        if settings.enabled && self.active_hrtf_set.is_some() {
+            let preference = self.direct_objects;
+            let result = self.set_direct_objects(true);
+            self.direct_objects = preference;
+            result?;
+        }
+        self.near_field = settings;
+        Ok(())
     }
 }
