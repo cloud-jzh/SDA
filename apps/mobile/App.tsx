@@ -173,8 +173,8 @@ export default class App extends React.Component<Record<string, never>, State> {
       const knownHashes = new Set(this.state.queue.map(track => track.contentHash));
       for (const asset of result.assets) {
         const extension = asset.name.split(".").pop()?.toLowerCase();
-        if (!extension || !["eac3", "ec3", "m4a", "mp4"].includes(extension)) {
-          throw new Error("请选择 .eac3/.ec3，或包含 E-AC-3/Atmos 音轨的 .m4a/.mp4 文件");
+        if (!extension || !["eac3", "ec3", "m4a", "mp4", "mp3"].includes(extension)) {
+          throw new Error("请选择 .eac3/.ec3、.mp3，或包含 E-AC-3/Atmos 音轨的 .m4a/.mp4 文件");
         }
         const contentHash = await this.getEngine().contentHash(asset.uri);
         if (knownHashes.has(contentHash)) continue;

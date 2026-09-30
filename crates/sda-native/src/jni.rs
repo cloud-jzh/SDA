@@ -125,6 +125,54 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeInitError(
     env.new_string(message).map(|value| value.into_raw()).unwrap_or_else(|_| std::ptr::null_mut())
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeHrtfLoaded(
+    _env: JNIEnv, _class: JClass, ptr: jlong,
+) -> jni::sys::jboolean {
+    take_engine(ptr).map(|engine| engine.hrtf_loaded() as u8).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeOpenMp3(
+    mut env: JNIEnv, _class: JClass, ptr: jlong, path: JString,
+) -> jint {
+    let path: String = match env.get_string(&path) { Ok(value) => value.into(), Err(_) => return -1 };
+    match take_engine(ptr).ok_or_else(|| "invalid engine".to_string()).and_then(|engine| engine.open_mp3(&path)) {
+        Ok(rate) => { set_last_error(""); rate as jint },
+        Err(error) => { set_last_error(&error); -1 },
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativePullMp3(
+    _env: JNIEnv, _class: JClass, ptr: jlong, max_frames: jint,
+) -> jint {
+    match take_engine(ptr).ok_or_else(|| "invalid engine".to_string()).and_then(|engine| engine.pull_mp3(max_frames.max(0) as usize)) {
+        Ok((frames, eof)) => {
+            set_last_error("");
+            if eof && frames == 0 { -4 } else { frames.min(i32::MAX as usize) as jint }
+        },
+        Err(error) => { set_last_error(&error); -1 },
+    }
+}
+
+fn last_error() -> &'static std::sync::Mutex<String> {
+    static ERROR: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    ERROR.get_or_init(|| std::sync::Mutex::new(String::new()))
+}
+
+fn set_last_error(message: &str) {
+    *last_error().lock().unwrap() = message.to_string();
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeLastError(
+    mut env: JNIEnv, _class: JClass,
+) -> jni::sys::jstring {
+    let message = last_error().lock().unwrap().clone();
+    env.new_string(message).map(|value| value.into_raw()).unwrap_or_else(|_| std::ptr::null_mut())
+}
+
 /// `nativeObjects(ptr: Long): String` — presentation-clock object metadata.
 #[no_mangle]
 pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeObjects(

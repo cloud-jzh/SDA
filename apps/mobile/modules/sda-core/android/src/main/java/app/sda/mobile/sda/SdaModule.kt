@@ -12,6 +12,7 @@ import java.security.MessageDigest
 class SdaModule : Module() {
     private var handle: Long = 0L
     private var media3Output: Media3Output? = null
+    @Volatile private var activeIsMp3 = false
     private var feedThread: Thread? = null
     @Volatile
     private var stopped = false
@@ -199,15 +200,30 @@ class SdaModule : Module() {
                     handle = 0L
                 }
             }
-            val input = Eac3Input.open(context, uri, displayName)
+            val isMp3 = displayName.substringAfterLast('.', "").equals("mp3", ignoreCase = true)
+            val mp3Cache = if (isMp3) java.io.File.createTempFile("sda-mp3-", ".mp3", context.cacheDir) else null
+            if (mp3Cache != null) {
+                try {
+                    val source = context.contentResolver.openInputStream(uri) ?: error("无法打开所选 MP3 文件")
+                    source.use { stream -> mp3Cache.outputStream().use { stream.copyTo(it, 64 * 1024) } }
+                } catch (error: Throwable) {
+                    mp3Cache.delete()
+                    throw error
+                }
+            }
+            val input = if (isMp3) java.io.ByteArrayInputStream(ByteArray(0)) else Eac3Input.open(context, uri, displayName)
             val ptr = try {
                 ensureEngine().also {
+                    if (mp3Cache != null) check(SdaEngine.nativeOpenMp3(it, mp3Cache.absolutePath) > 0) {
+                        "MP3 打开失败: ${SdaEngine.nativeLastError()}"
+                    }
                     check(SdaEngine.nativeSetHeadYaw(it, headYawDegrees.toFloat()) == 0) {
                         "Native head yaw command failed during startup"
                     }
                 }
             } catch (error: Throwable) {
                 input.close()
+                mp3Cache?.delete()
                 synchronized(nativeLock) {
                     if (handle != 0L) {
                         SdaEngine.nativeClose(handle)
@@ -224,6 +240,7 @@ class SdaModule : Module() {
             feedDone = false
             paused = false
             stopped = false
+            activeIsMp3 = isMp3
             activeInput = input
             val worker = Thread({
                 try {
@@ -256,6 +273,15 @@ class SdaModule : Module() {
                             }
                             if (decoded - consumed > maxLead || fifoFrames > maxLead) {
                                 Thread.sleep(20)
+                                continue
+                            }
+                            if (isMp3) {
+                                val pulled = synchronized(nativeLock) {
+                                    if (generation != workerGeneration || handle != ptr || stopped) return@Thread
+                                    SdaEngine.nativePullMp3(ptr, 4096)
+                                }
+                                if (pulled == -4) break
+                                check(pulled >= 0) { "MP3 解码失败: ${SdaEngine.nativeLastError()}" }
                                 continue
                             }
                             val count = stream.read(buffer)
@@ -314,6 +340,8 @@ class SdaModule : Module() {
                         }
                     }
                     feedDone = true
+                } finally {
+                    mp3Cache?.delete()
                 }
             }, "sda-content-feed")
             feedThread = worker
@@ -387,6 +415,9 @@ class SdaModule : Module() {
         Function("feedError") { -> media3Output?.error ?: feedError }
 
         Function("feedDone") { -> feedDone }
+
+        Function("stereoBedMode") { -> activeIsMp3 }
+        Function("nativeLastError") { -> SdaEngine.nativeLastError() }
 
         Function("setVolume") { volume: Float ->
             synchronized(nativeLock) {
