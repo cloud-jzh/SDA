@@ -136,6 +136,7 @@ def sharedAssets = layout.buildDirectory.dir('generated/sharedKu100Assets')
 android.sourceSets.main.assets.setSrcDirs([sharedAssets])
 def syncSharedKu100Assets = tasks.register('syncSharedKu100Assets', Sync) {
     from(mobileAssets) { exclude 'hrtf/**', 'hrtf-dense/**' }
+    from('../../../../vendor/libmpegh') { include 'LICENSE', 'LICENSE2'; into 'licenses/libmpegh' }
     from(windowsHrtfAssets) { include 'hrtf/**', 'hrtf-dense/**' }
     into(sharedAssets)
     doFirst {

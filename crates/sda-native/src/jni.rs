@@ -133,6 +133,16 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeHrtfLoaded(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeOpenMpegh(
+    _env: JNIEnv, _class: JClass, ptr: jlong,
+) -> jint {
+    match take_engine(ptr).ok_or_else(|| "invalid engine".to_string()).and_then(|engine| engine.open_mpegh()) {
+        Ok(()) => { set_last_error(""); 0 },
+        Err(error) => { set_last_error(&error); -1 },
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeOpenMp3(
     mut env: JNIEnv, _class: JClass, ptr: jlong, path: JString,
 ) -> jint {
@@ -251,6 +261,7 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeFeed(
     match engine.feed(&data) {
         Ok(status) => status.frames_pushed as jint,
         Err(error) => {
+            set_last_error(&error);
             android_log(&format!("feed failed: {error}"));
             -1
         },
@@ -284,7 +295,7 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeFinish(
     ptr: jlong,
 ) -> jint {
     match take_engine(ptr) {
-        Some(engine) => engine.finish().map(|status| status.frames_pushed as jint).unwrap_or(-1),
+        Some(engine) => match engine.finish() { Ok(status) => status.frames_pushed as jint, Err(error) => { set_last_error(&error); -1 } },
         None => -2,
     }
 }

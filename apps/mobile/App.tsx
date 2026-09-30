@@ -1,4 +1,5 @@
 import React from "react";
+import { prepare360RaMp4, type MpeghMp4Host } from "./src/mpeghMp4";
 import { nextPlaylistItemId, adjacentPlaylistItemId, type PlaybackMode } from "../web/src/playbackOrder";
 import * as DocumentPicker from "expo-document-picker";
 import { RemotePlayer, type TrackMetadata, type QueueTrack } from "./src/RemotePlayer";
@@ -21,7 +22,7 @@ interface PlaybackStatus {
   roomEnabled: boolean;
 }
 interface ObjectPoint extends MobileObjectPoint { samplePos: number; hasPos: boolean }
-interface SdaEngineModule {
+interface SdaEngineModule extends MpeghMp4Host {
   contentHash(uri: string): Promise<string>;
   metadata(uri: string): Promise<string>;
   durationMs(uri: string): Promise<number>;
@@ -44,6 +45,7 @@ interface SdaEngineModule {
   setNearField(enabled: boolean, metresPerUnit: number): Promise<void>;
 }
 interface State {
+  layout: "7.1.4" | "360RA-13";
   playbackMode: PlaybackMode;
   queue: QueueTrack[];
   queueIndex: number;
@@ -76,6 +78,7 @@ interface State {
 
 export default class App extends React.Component<Record<string, never>, State> {
   state: State = {
+    layout: "7.1.4",
     playbackMode: "sequence",
     queue: [],
     queueIndex: -1,
@@ -173,8 +176,8 @@ export default class App extends React.Component<Record<string, never>, State> {
       const knownHashes = new Set(this.state.queue.map(track => track.contentHash));
       for (const asset of result.assets) {
         const extension = asset.name.split(".").pop()?.toLowerCase();
-        if (!extension || !["eac3", "ec3", "m4a", "mp4", "mp3"].includes(extension)) {
-          throw new Error("请选择 .eac3/.ec3、.mp3，或包含 E-AC-3/Atmos 音轨的 .m4a/.mp4 文件");
+        if (!extension || !["eac3", "ec3", "m4a", "mp4", "mp3", "mhas"].includes(extension)) {
+          throw new Error("请选择 .eac3/.ec3、.mp3、.mhas，或包含 Atmos/360RA 音轨的 .m4a/.mp4 文件");
         }
         const contentHash = await this.getEngine().contentHash(asset.uri);
         if (knownHashes.has(contentHash)) continue;
@@ -217,7 +220,18 @@ export default class App extends React.Component<Record<string, never>, State> {
       const engine = this.getEngine();
       if (!this.poller) this.poller = setInterval(() => this.pollStatus(), 80);
       this.setState({ hrtfStatus: engine.hrtfStatus() });
-      await engine.playUri(track.uri, track.name, this.state.headYaw);
+      engine.stop();
+      const imported = await prepare360RaMp4(engine, track.uri, track.name);
+      try {
+        await engine.playUri(imported?.uri ?? track.uri, imported?.name ?? track.name, this.state.headYaw);
+        if (imported?.durationMs) this.setState({ durationMs: imported.durationMs });
+        const settings = JSON.parse(engine.renderingSettings());
+        this.setState({ roomId: settings.roomId || "", layout: settings.layout });
+      } finally {
+        // playUri has opened its InputStream. Android keeps that descriptor valid
+        // after unlinking the temporary extraction, including while paused.
+        await imported?.release();
+      }
       engine.setVolume(this.state.volume);
       this.setState({ playing: true, ended: false, paused: false, error: null });
     } catch (error) {

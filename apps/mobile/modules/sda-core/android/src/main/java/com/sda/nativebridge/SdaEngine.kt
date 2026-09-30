@@ -12,6 +12,7 @@ object SdaEngine {
     external fun nativeInitError(): String
     external fun nativeStart(ptr: Long, output: app.sda.mobile.sda.Media3Output): Int
     external fun nativeHrtfLoaded(ptr: Long): Boolean
+    external fun nativeOpenMpegh(ptr: Long): Int
     external fun nativeOpenMp3(ptr: Long, path: String): Int
     external fun nativePullMp3(ptr: Long, maxFrames: Int): Int
     external fun nativeLastError(): String

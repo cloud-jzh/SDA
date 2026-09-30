@@ -1,4 +1,4 @@
-import { PALETTE, Room, Listener, GenelecSpeaker, GenelecSub, type Palette } from "../../../../packages/renderer/src/scene-models";
+import { PALETTE, Room, SphericalRoom, Listener, GenelecSpeaker, GenelecSub, type Palette } from "../../../../packages/renderer/src/scene-models";
 import Performance3D from "./Performance3D";
 import {spatialRenderer, spatialShadows} from '../spatial-renderer';
 import AvatarSkinControl from "./AvatarSkinControl";
@@ -160,35 +160,6 @@ const SpeakerRing = memo(function SpeakerRing({ layout, focusedSpeakers, onSpeak
       ))}
     </group>
   );
-});
-
-/** MPEG-H OAM uses full-sphere directions, including negative elevation. */
-const SphericalRoom = memo(function SphericalRoom({ p }: { p: Palette }) {
-  const geometry = useMemo(() => {
-    const points: number[] = [];
-    const segment = (a: number[], b: number[]) => points.push(...a, ...b);
-    for (const elevation of [-60, -30, 0, 30, 60]) {
-      const angle = elevation * Math.PI / 180;
-      const radius = ROOM * Math.cos(angle), y = ROOM * Math.sin(angle);
-      for (let i = 0; i < 96; i++) {
-        const a = i * Math.PI / 48, b = (i + 1) * Math.PI / 48;
-        segment([radius * Math.cos(a), y, radius * Math.sin(a)], [radius * Math.cos(b), y, radius * Math.sin(b)]);
-      }
-    }
-    for (let meridian = 0; meridian < 6; meridian++) {
-      const az = meridian * Math.PI / 6;
-      for (let i = 0; i < 96; i++) {
-        const a = i * Math.PI / 48, b = (i + 1) * Math.PI / 48;
-        segment([ROOM * Math.cos(a) * Math.cos(az), ROOM * Math.sin(a), ROOM * Math.cos(a) * Math.sin(az)],
-          [ROOM * Math.cos(b) * Math.cos(az), ROOM * Math.sin(b), ROOM * Math.cos(b) * Math.sin(az)]);
-      }
-    }
-    return new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(points, 3));
-  }, []);
-  useEffect(() => () => geometry.dispose(), [geometry]);
-  return <group name="mpegh-spherical-field">
-    <lineSegments geometry={geometry}><lineBasicMaterial color={p.outline} transparent opacity={0.55} depthWrite={false}/></lineSegments>
-  </group>;
 });
 
 /** 听者：仿纽曼 KU 100 人头麦 —— 光滑无五官的蛋形头、两侧硅胶耳廓、

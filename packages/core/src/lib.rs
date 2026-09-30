@@ -44,6 +44,8 @@ pub struct ObjectEvent {
     pub size: [f64; 3],
     /// Codec metadata anchor: room, screen, or speaker.
     pub anchor: String,
+    /// MPEG-H diffuse energy fraction, independent of object extent.
+    pub diffuse: f64,
     /// Finite codec object distance in metres; None means not transmitted.
     pub distance_m: Option<f64>,
     /// Codec explicitly marked this object as infinitely distant.
@@ -416,6 +418,7 @@ mod tests {
     #[test]
     fn object_event_json_contract_is_camel_case() {
         let event = ObjectEvent {
+            diffuse: 0.0,
             id: 10,
             sample_pos: 1536,
             has_pos: true,

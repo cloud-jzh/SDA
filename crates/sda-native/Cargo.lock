@@ -882,6 +882,7 @@ dependencies = [
 name = "sda-native"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "jni",
  "rubato",
  "sda-core",

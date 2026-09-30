@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo } from "react";
 import * as THREE from "three";
 // This leaf component is platform-neutral (no DOM or web Canvas imports).
 import { RoundedBox } from "@react-three/drei/core/RoundedBox";
@@ -181,4 +181,33 @@ export function Listener() {
       </mesh>
     </group>
   );
+}
+
+/** MPEG-H OAM uses full-sphere directions, including negative elevation. */
+export function SphericalRoom({ p }: { p: Palette }) {
+  const geometry = useMemo(() => {
+    const points: number[] = [];
+    const segment = (a: number[], b: number[]) => points.push(...a, ...b);
+    for (const elevation of [-60, -30, 0, 30, 60]) {
+      const angle = elevation * Math.PI / 180;
+      const radius = ROOM * Math.cos(angle), y = ROOM * Math.sin(angle);
+      for (let i = 0; i < 96; i++) {
+        const a = i * Math.PI / 48, b = (i + 1) * Math.PI / 48;
+        segment([radius * Math.cos(a), y, radius * Math.sin(a)], [radius * Math.cos(b), y, radius * Math.sin(b)]);
+      }
+    }
+    for (let meridian = 0; meridian < 6; meridian++) {
+      const az = meridian * Math.PI / 6;
+      for (let i = 0; i < 96; i++) {
+        const a = i * Math.PI / 48, b = (i + 1) * Math.PI / 48;
+        segment([ROOM * Math.cos(a) * Math.cos(az), ROOM * Math.sin(a), ROOM * Math.cos(a) * Math.sin(az)],
+          [ROOM * Math.cos(b) * Math.cos(az), ROOM * Math.sin(b), ROOM * Math.cos(b) * Math.sin(az)]);
+      }
+    }
+    return new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(points, 3));
+  }, []);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return <group name="mpegh-spherical-field">
+    <lineSegments geometry={geometry}><lineBasicMaterial color={p.outline} transparent opacity={0.55} depthWrite={false}/></lineSegments>
+  </group>;
 }

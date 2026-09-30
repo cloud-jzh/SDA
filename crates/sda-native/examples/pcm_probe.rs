@@ -123,6 +123,7 @@ fn desktop_feeder(args: &[String], limit: u64) {
             // Decode ObjectEvent through explicit fields because core exposes
             // serialization only. Keep this adapter diagnostic-only.
             let events = value["events"].as_array().unwrap().iter().map(|e| sda_core::ObjectEvent {
+                diffuse: e["diffuse"].as_f64().unwrap_or(0.0),
                 id: e["id"].as_u64().unwrap() as u32, sample_pos: e["samplePos"].as_u64().unwrap(),
                 has_pos: e["hasPos"].as_bool().unwrap(), pos: serde_json::from_value(e["pos"].clone()).unwrap(),
                 gain_db: e["gainDb"].as_f64().unwrap(), size: serde_json::from_value(e["size"].clone()).unwrap(),

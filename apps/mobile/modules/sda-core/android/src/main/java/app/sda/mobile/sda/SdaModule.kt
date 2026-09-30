@@ -10,7 +10,9 @@ import java.security.MessageDigest
 
 /** Android Expo bridge for raw and M4A/MP4-contained E-AC-3/JOC streams. */
 class SdaModule : Module() {
+    private val mpeghImport = MpeghImport()
     private var handle: Long = 0L
+    private var activeLayout = "7.1.4"
     private var media3Output: Media3Output? = null
     @Volatile private var activeIsMp3 = false
     private var feedThread: Thread? = null
@@ -44,7 +46,7 @@ class SdaModule : Module() {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun ensureEngine(): Long = synchronized(nativeLock) {
+    private fun ensureEngine(layout: String = "7.1.4"): Long = synchronized(nativeLock) {
         if (handle != 0L) return@synchronized handle
         val context = appContext?.reactContext ?: throw RuntimeException("no react context")
         // Ask Android to provision the app-owned directory (also used by
@@ -75,7 +77,7 @@ class SdaModule : Module() {
         hrtfLoadStatus = "KU100 资源已就绪，正在加载"
         val settings = renderingSettings()
         val config = JSONObject().put("sampleRate", 48000).put("outputChannels", 2)
-            .put("layout", "7.1.4").put("directObjectHrtf", settings.getBoolean("direct"))
+            .put("layout", layout).put("directObjectHrtf", settings.getBoolean("direct"))
             .put("directionalHrtf", settings.getBoolean("directional")).toString()
         val ptr = SdaEngine.nativeInit(config, java.io.File(context.filesDir, "hrtf-dense/hrtf-set.json").absolutePath)
         if (ptr == 0L) {
@@ -84,12 +86,16 @@ class SdaModule : Module() {
             throw RuntimeException(hrtfLoadStatus)
         }
         handle = ptr
+        activeLayout = layout
         try {
-            val roomPath = RoomAssets.prepare(context, settings.getString("roomId"))
+            val roomId = RoomAssets.forLayout(context, settings.getString("roomId"), layout)
+            val roomPath = RoomAssets.prepare(context, roomId)
             if (roomPath.isNotEmpty()) {
                 val error = SdaEngine.nativeSetRoom(ptr, roomPath)
                 check(error.isEmpty()) { error }
             }
+            if (roomId.isNotEmpty()) context.getSharedPreferences("sda-rendering", 0).edit()
+                .putString("roomId", roomId).putString("roomId_$layout", roomId).apply()
             val nearError = SdaEngine.nativeSetNearField(ptr, settings.getBoolean("nearField"), settings.getDouble("metresPerUnit").toFloat())
             check(nearError.isEmpty()) { nearError }
         } catch (error: Throwable) {
@@ -171,7 +177,9 @@ class SdaModule : Module() {
                     val error = SdaEngine.nativeSetRoom(handle, path)
                     check(error.isEmpty()) { error }
                 }
-                context.getSharedPreferences("sda-rendering", 0).edit().putString("roomId", id).apply()
+                val preferences = context.getSharedPreferences("sda-rendering", 0).edit().putString("roomId", id)
+                if (id.isNotEmpty()) preferences.putString("roomId_${RoomAssets.layout(context, id)}", id)
+                preferences.apply()
             }
         }
 
@@ -188,6 +196,14 @@ class SdaModule : Module() {
             }
         }
 
+        AsyncFunction("beginMp4Import") { uri: String ->
+            mpeghImport.begin(appContext.reactContext ?: error("no react context"), Uri.parse(uri))
+        }
+        AsyncFunction("readMp4Import") { token: String, offset: Double, count: Int -> mpeghImport.read(token, offset, count) }
+        AsyncFunction("appendMp4Import") { token: String, bytes: String -> mpeghImport.append(token, bytes) }
+        AsyncFunction("finishMp4Import") { token: String -> mpeghImport.finish(token) }
+        AsyncFunction("discardMp4Import") { token: String -> mpeghImport.discard(token) }
+
         AsyncFunction("playUri") { uriString: String, displayName: String, headYawDegrees: Double ->
             require(headYawDegrees.isFinite() && headYawDegrees in -180.0..180.0) { "Head yaw must be finite and between -180 and 180 degrees" }
             stopFeedThread()
@@ -200,6 +216,7 @@ class SdaModule : Module() {
                     handle = 0L
                 }
             }
+            val isMpegh = displayName.substringAfterLast('.', "").equals("mhas", ignoreCase = true)
             val isMp3 = displayName.substringAfterLast('.', "").equals("mp3", ignoreCase = true)
             val mp3Cache = if (isMp3) java.io.File.createTempFile("sda-mp3-", ".mp3", context.cacheDir) else null
             if (mp3Cache != null) {
@@ -213,7 +230,10 @@ class SdaModule : Module() {
             }
             val input = if (isMp3) java.io.ByteArrayInputStream(ByteArray(0)) else Eac3Input.open(context, uri, displayName)
             val ptr = try {
-                ensureEngine().also {
+                ensureEngine(if (isMpegh) "360RA-13" else "7.1.4").also {
+                    if (isMpegh) check(SdaEngine.nativeOpenMpegh(it) == 0) {
+                        "360RA 打开失败: ${SdaEngine.nativeLastError()}"
+                    }
                     if (mp3Cache != null) check(SdaEngine.nativeOpenMp3(it, mp3Cache.absolutePath) > 0) {
                         "MP3 打开失败: ${SdaEngine.nativeLastError()}"
                     }
@@ -293,14 +313,14 @@ class SdaModule : Module() {
                                     buffer.copyOf(count)
                                 )
                             }
-                            check(result >= 0) { "nativeFeed failed: $result" }
+                            check(result >= 0) { "nativeFeed failed: ${SdaEngine.nativeLastError()}" }
                         }
                         if (!stopped) {
                             var eofDeadline = System.nanoTime() + 15_000_000_000L
                             synchronized(nativeLock) {
                                 if (generation == workerGeneration && handle == ptr && !stopped) {
                                     val result = SdaEngine.nativeFinish(ptr)
-                                    check(result >= 0) { "nativeFinish failed: $result" }
+                                    check(result >= 0) { "nativeFinish failed: ${SdaEngine.nativeLastError()}" }
                                 }
                             }
                             while (!stopped) {
@@ -426,6 +446,7 @@ class SdaModule : Module() {
         }
 
         OnDestroy {
+            mpeghImport.close()
             stopFeedThread()
             synchronized(nativeLock) {
                 if (handle != 0L) {
@@ -439,7 +460,7 @@ class SdaModule : Module() {
     private fun renderingSettings(): JSONObject {
         val context = appContext.reactContext ?: throw RuntimeException("no react context")
         val preferences = context.getSharedPreferences("sda-rendering", 0)
-        return JSONObject().put("direct", preferences.getBoolean("direct", true))
+        return JSONObject().put("layout", activeLayout).put("direct", preferences.getBoolean("direct", true))
             .put("directional", preferences.getBoolean("directional", true))
             .put("roomId", preferences.getString("roomId", "") ?: "")
             .put("nearField", preferences.getBoolean("nearField", false))

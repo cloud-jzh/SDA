@@ -30,10 +30,10 @@ object Eac3Input {
 
     fun open(context: Context, uri: Uri, displayName: String): InputStream {
         return when (displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
-            "eac3", "ec3" -> context.contentResolver.openInputStream(uri)
+            "eac3", "ec3", "mhas" -> context.contentResolver.openInputStream(uri)
                 ?: throw IllegalArgumentException("无法打开所选音频文件")
             "m4a", "mp4" -> openContainer(context, uri)
-            else -> throw IllegalArgumentException("支持 .eac3/.ec3，以及包含 E-AC-3/Atmos 音轨的 .m4a/.mp4")
+            else -> throw IllegalArgumentException("支持 .eac3/.ec3、.mhas，以及包含 Atmos/360RA 音轨的 .m4a/.mp4")
         }
     }
 

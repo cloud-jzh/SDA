@@ -25,6 +25,27 @@ internal object RoomAssets {
         }
     }
 
+    /** Same selection order as Windows room-layout-follow.cjs: keep disabled,
+     * keep matching, restore remembered, then select the matching builtin. */
+    fun forLayout(context: Context, id: String, layout: String): String {
+        if (id.isEmpty()) return ""
+        val catalog = entries(context)
+        fun matching(candidate: String) = (0 until catalog.length()).any {
+            val entry = catalog.getJSONObject(it)
+            entry.getString("id") == candidate && entry.getJSONObject("summary").getString("layout") == layout
+        }
+        if (matching(id)) return id
+        val remembered = context.getSharedPreferences("sda-rendering", 0).getString("roomId_$layout", "") ?: ""
+        if (matching(remembered)) return remembered
+        return (0 until catalog.length()).map { catalog.getJSONObject(it) }
+            .firstOrNull { it.getJSONObject("summary").getString("layout") == layout }?.getString("id")
+            ?: error("没有与 $layout 匹配的 Windows 房间资产")
+    }
+
+    fun layout(context: Context, id: String): String = (0 until entries(context).length())
+        .map { entries(context).getJSONObject(it) }.first { it.getString("id") == id }
+        .getJSONObject("summary").getString("layout")
+
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
@@ -33,7 +54,6 @@ internal object RoomAssets {
         val entries = entries(context)
         val entry = (0 until entries.length()).map { entries.getJSONObject(it) }
             .firstOrNull { it.getString("id") == id } ?: error("未知房间资产")
-        check(entry.getJSONObject("summary").getString("layout") == "7.1.4") { "房间布局不匹配" }
         val directory = File(context.filesDir, "builtin-rooms").apply { mkdirs() }
         val file = File(directory, "$id.json")
         if (file.isFile && file.length() == entry.getLong("bytes") && hash(file.readBytes()) == id) return file.absolutePath

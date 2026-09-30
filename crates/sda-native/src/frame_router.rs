@@ -12,7 +12,7 @@ pub(crate) struct FrameRouter {
 
 fn same_target(a: &ObjectEvent, b: &ObjectEvent) -> bool {
     a.has_pos == b.has_pos && a.pos == b.pos && a.gain_db == b.gain_db
-        && a.size == b.size && a.anchor == b.anchor && a.distance_m == b.distance_m
+        && a.size == b.size && a.diffuse == b.diffuse && a.anchor == b.anchor && a.distance_m == b.distance_m
         && a.distance_infinite == b.distance_infinite && a.screen_factor == b.screen_factor
         && a.depth_factor == b.depth_factor
 }
@@ -97,7 +97,7 @@ mod tests {
             program_loudness: None, ramp_duration: 0 }
     }
     fn event(at: u64) -> ObjectEvent {
-        ObjectEvent { id: 42, sample_pos: at, has_pos: true, pos: [0.0,1.0,0.0],
+        ObjectEvent { diffuse: 0.0, id: 42, sample_pos: at, has_pos: true, pos: [0.0,1.0,0.0],
             gain_db: 0.0, size: [0.0;3], anchor: "room".into(), distance_m: None,
             distance_infinite: false, screen_factor: None, depth_factor: None, ramp_duration: 128 }
     }

@@ -9,6 +9,7 @@ export interface TrackMetadata {
 }
 export interface QueueTrack { contentHash: string; uri: string; name: string; metadata: TrackMetadata }
 interface Props {
+  layout: "7.1.4" | "360RA-13";
   playbackMode: PlaybackMode; setPlaybackMode(mode: PlaybackMode): void;
   queue: QueueTrack[]; queueIndex: number;
   selectTrack(index: number): void; previous(): void; next(): void;
@@ -162,9 +163,9 @@ export function RemotePlayer(p: Props) {
       </ScrollView>
       <ScrollView style={{ width: pageWidth }} contentContainerStyle={{ paddingBottom: 6 }}>
         <View style={[s.card, { minHeight: cardHeight, backgroundColor: c.panel, borderColor: c.line }]}>
-          <View style={s.row}>{label("空间视图", false, s.sectionTitle)}{label(`${p.objects.length} 个对象`, true, s.small)}</View>
-          {label("7.1.4 · 对象实时位置", true, { ...s.small, marginTop: 12 })}
-          <View style={[s.scene, { height: Math.max(260, height * .40) }]}>{page === 2 && <MobileObjectScene objects={p.objects} />}</View>
+          <View style={s.row}>{label(p.layout === "360RA-13" ? "360° 球形声场" : "空间视图", false, s.sectionTitle)}{label(`${p.objects.length} 个对象`, true, s.small)}</View>
+          {label(`${p.layout} · 对象实时位置`, true, { ...s.small, marginTop: 12 })}
+          <View style={[s.scene, { height: Math.max(260, height * .40) }]}>{page === 2 && <MobileObjectScene layout={p.layout} objects={p.objects} />}</View>
           {label("单指旋转 · 双指缩放", true, s.help)}
         </View>
       </ScrollView>
@@ -217,7 +218,7 @@ export function RemotePlayer(p: Props) {
           </View>
           <View style={[s.settingsCard, { backgroundColor: c.panel, marginTop: 12 }]}>
             <View style={s.profileHeader}>{label("房间仿真", false, s.settingTitle)}{label(p.roomBusy ? "切换中…" : p.roomId ? "已开启" : "已关闭", true, s.settingDescription)}</View>
-            {[{ id: "", name: "关闭", layout: "" }, ...p.rooms].map(room => <Pressable key={room.id} accessibilityRole="radio" accessibilityState={{ checked: room.id === p.roomId, disabled: p.busy || p.roomBusy }} accessibilityLabel={room.id ? "近场录音棚房间仿真" : "关闭房间仿真"} disabled={p.busy || p.roomBusy} onPress={() => p.setRoom(room.id)} style={[s.roomOption, { borderColor: room.id === p.roomId ? "#167d72" : c.line, backgroundColor: room.id === p.roomId ? c.soft : "transparent", opacity: p.roomBusy ? .5 : 1 }]}>
+            {[{ id: "", name: "关闭", layout: "" }, ...p.rooms.filter(room => room.layout === p.layout)].map(room => <Pressable key={room.id} accessibilityRole="radio" accessibilityState={{ checked: room.id === p.roomId, disabled: p.busy || p.roomBusy }} accessibilityLabel={room.id ? "近场录音棚房间仿真" : "关闭房间仿真"} disabled={p.busy || p.roomBusy} onPress={() => p.setRoom(room.id)} style={[s.roomOption, { borderColor: room.id === p.roomId ? "#167d72" : c.line, backgroundColor: room.id === p.roomId ? c.soft : "transparent", opacity: p.roomBusy ? .5 : 1 }]}>
               <View style={s.settingCopy}>{label(room.id && room.name.startsWith("SDA Near-field Control Room") ? "近场录音棚" : room.name, false, s.settingTitle)}{!!room.id && label(`${room.layout} · Windows 房间资产`, true, s.settingDescription)}</View>{label(room.id === p.roomId ? "●" : "○", room.id !== p.roomId, { fontSize: 20 })}
             </Pressable>)}
           </View>

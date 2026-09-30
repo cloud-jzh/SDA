@@ -2,9 +2,9 @@ import React, { useMemo, useRef } from "react";
 import { PanResponder, View, type GestureResponderEvent, type PanResponderGestureState } from "react-native";
 import { Canvas, useFrame, useThree } from "@react-three/fiber/native";
 import * as THREE from "three";
-import { PALETTE, Room, Listener, GenelecSpeaker, GenelecSub } from "../../../packages/renderer/src/scene-models";
+import { PALETTE, Room, SphericalRoom, Listener, GenelecSpeaker, GenelecSub } from "../../../packages/renderer/src/scene-models";
 import { rotateScene } from "./scene-gesture";
-import { LAYOUT_7_1_4 } from "../../../packages/renderer/src/layouts";
+import { LAYOUT_7_1_4, LAYOUT_360RA } from "../../../packages/renderer/src/layouts";
 import { admToScenePosition, SCENE_FLOOR_Y, SCENE_ROOM_HALF_EXTENT, SCENE_WALL_HEIGHT, SCENE_WALL_MID_Y, smoothScenePosition, speakerScenePosition } from "../../../packages/renderer/src/scene-coordinates";
 
 export interface MobileObjectPoint { id: number; pos: [number, number, number]; gainDb: number }
@@ -24,7 +24,7 @@ function ObjectPoint({ object }: { object: MobileObjectPoint }) {
   </group>;
 }
 
-function Scene({ objects, cameraInput }: { objects: readonly MobileObjectPoint[]; cameraInput: { rotation: { x: number; y: number }; distance: number } }) {
+function Scene({ objects, cameraInput, layout }: { layout: "7.1.4" | "360RA-13"; objects: readonly MobileObjectPoint[]; cameraInput: { rotation: { x: number; y: number }; distance: number } }) {
   const camera = useThree((state) => state.camera);
   useFrame(() => {
     const spherical = new THREE.Spherical(cameraInput.distance, Math.PI / 2.9 + cameraInput.rotation.y, cameraInput.rotation.x);
@@ -35,9 +35,9 @@ function Scene({ objects, cameraInput }: { objects: readonly MobileObjectPoint[]
   return <>
     <color attach="background" args={[PALETTE.dark.bg]} />
     <ambientLight intensity={0.75} /><directionalLight position={[2.5, 4, 2]} intensity={1.2} />
-    <Room p={PALETTE.dark} />
-    <gridHelper args={[SCENE_ROOM_HALF_EXTENT * 2, 10, PALETTE.dark.gridMain, PALETTE.dark.floorGrid]} position={[0, SCENE_FLOOR_Y, 0]} />
-    {LAYOUT_7_1_4.map((speaker) => {
+    {layout === "360RA-13" ? <SphericalRoom p={PALETTE.dark} /> : <Room p={PALETTE.dark} />}
+    {layout !== "360RA-13" && <gridHelper args={[SCENE_ROOM_HALF_EXTENT * 2, 10, PALETTE.dark.gridMain, PALETTE.dark.floorGrid]} position={[0, SCENE_FLOOR_Y, 0]} />}
+    {(layout === "360RA-13" ? LAYOUT_360RA : LAYOUT_7_1_4).map((speaker) => {
       const position = speakerScenePosition(speaker);
       const facing = new THREE.Object3D();
       facing.position.set(...position);
@@ -51,7 +51,7 @@ function Scene({ objects, cameraInput }: { objects: readonly MobileObjectPoint[]
   </>;
 }
 
-export function MobileObjectScene({ objects }: { objects: readonly MobileObjectPoint[] }) {
+export function MobileObjectScene({ objects, layout }: { layout: "7.1.4" | "360RA-13"; objects: readonly MobileObjectPoint[] }) {
   const input = useRef({ rotation: { x: 0.72, y: 0.25 }, distance: 7 });
   const previousPinch = useRef(0);
   const previousDrag = useRef<{ x: number; y: number } | null>(null);
@@ -85,7 +85,7 @@ export function MobileObjectScene({ objects }: { objects: readonly MobileObjectP
   })).current;
   return <View style={{ flex: 1, overflow: "hidden" }} onLayout={event => { viewportHeight.current = event.nativeEvent.layout.height; }} {...pan.panHandlers}>
     <Canvas camera={{ position: [5, 4.2, 6], fov: 50 }} gl={{ antialias: false, alpha: false }}>
-      <Scene objects={objects} cameraInput={input.current} />
+      <Scene layout={layout} objects={objects} cameraInput={input.current} />
     </Canvas>
   </View>;
 }

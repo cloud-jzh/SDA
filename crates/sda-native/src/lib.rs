@@ -27,6 +27,7 @@
 //! `obj:{codec object id}`, bed channels are `bed:{channel index}`.
 
 mod frame_router;
+pub mod mpegh;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -170,6 +171,7 @@ pub struct MobileEngine {
     active_objects: Mutex<HashMap<u32, ObjectEvent>>,
     stereo_bed_mode: bool,
     mp3_decoder: Option<mp3::Mp3FileDecoder>,
+    mpegh_decoder: Option<mpegh::MpeghDecoder>,
     hrtf_loaded: bool,
 }
 
@@ -203,6 +205,7 @@ impl MobileEngine {
             active_objects: Mutex::new(HashMap::new()),
             stereo_bed_mode: false,
             mp3_decoder: None,
+            mpegh_decoder: None,
             hrtf_loaded: false,
         })
     }
@@ -328,6 +331,7 @@ impl MobileEngine {
 
     pub fn reset_source_state(&mut self) {
         self.mp3_decoder = None;
+        self.mpegh_decoder = None;
         self.stereo_bed_mode = false;
         self.decoder = StreamingDecoder::new("auto").expect("known decoder type");
         self.pending.lock().expect("pending lock").clear();
@@ -339,12 +343,31 @@ impl MobileEngine {
         *self.newest_sample_pos.lock().expect("clock lock") = 0;
     }
 
+    /// Select the Windows MPEG-H decoder. Input is MHAS (mha1 is wrapped by the
+    /// shared Windows MP4/MHAS adapter before it reaches JNI).
+    pub fn open_mpegh(&mut self) -> EngineResult<()> {
+        if self.mp3_decoder.is_some() || self.mpegh_decoder.is_some() {
+            return Err("engine already has an active media source".into());
+        }
+        let decoder = mpegh::MpeghDecoder::new()?;
+        // Windows auto-layout selects its authored below-ear speaker layer.
+        self.config.layout = "360RA-13".into();
+        if let Some(pipeline) = &self.pipeline {
+            pipeline.commands.push(render_command::RenderCommand::Command(
+                Command::SetLayout { layout: self.config.layout.clone() },
+            )).map_err(|_| "360RA layout command queue full")?;
+        }
+        self.mpegh_decoder = Some(decoder);
+        Ok(())
+    }
+
     /// Feed demuxed bitstream bytes (any chunking; the decoder re-frames).
     /// Decoded frames are converted to `PcmFrame` render commands once the
     /// pipeline is started; before that they queue (visualizer-only use).
     pub fn feed(&mut self, data: &[u8]) -> EngineResult<DecodeStatus> {
-        self.decoder.push(data)?;
-        let codec = self.decoder.codec_name().to_string();
+        if let Some(decoder) = &mut self.mpegh_decoder { decoder.push(data)?; }
+        else { self.decoder.push(data)?; }
+        let codec = self.codec_name().to_string();
         if self.announced_codec.as_ref() != Some(&codec) && codec != "auto" && !codec.is_empty() {
             if let Some(pipeline) = &self.pipeline {
                 pipeline.commands.push(render_command::RenderCommand::Command(
@@ -357,7 +380,10 @@ impl MobileEngine {
         let mut sample_pos = self.decoded_sample_pos();
         {
             let mut pending = self.pending.lock().expect("pending lock");
-            while let Some(frame) = self.decoder.next_frame() {
+            while let Some(frame) = if let Some(decoder) = &mut self.mpegh_decoder { decoder.next_frame() } else { self.decoder.next_frame() } {
+                if frame.sample_rate != self.config.sample_rate {
+                    return Err(format!("Native {} Hz output requires sample-clock conversion for {} {} Hz", self.config.sample_rate, frame.codec, frame.sample_rate));
+                }
                 sample_pos = frame.sample_pos + frame.channels.first().map_or(0, |pcm| pcm.len()) as u64;
                 {
                     let mut timeline = self.object_events.lock().expect("object events lock");
@@ -376,7 +402,7 @@ impl MobileEngine {
         *self.newest_sample_pos.lock().expect("clock lock") = sample_pos;
         self.drain_pending_into_pipeline()?;
         Ok(DecodeStatus {
-            codec: self.decoder.codec_name().to_string(),
+            codec: self.codec_name().to_string(),
             frames_pushed,
             sample_pos,
             errors: self.decoder.drain_errors(),
@@ -384,7 +410,7 @@ impl MobileEngine {
     }
 
     pub fn finish(&mut self) -> EngineResult<DecodeStatus> {
-        self.decoder.flush();
+        if let Some(decoder) = &self.mpegh_decoder { decoder.flush()?; } else { self.decoder.flush(); }
         let status = self.feed(&[])?;
         self.startup.lock().expect("startup lock").ended = true;
         self.start_playback_if_ready()?;
@@ -591,7 +617,7 @@ impl MobileEngine {
 
     /// Codec in use (meaningful after auto-detection).
     pub fn codec_name(&self) -> &str {
-        self.decoder.codec_name()
+        if self.mpegh_decoder.is_some() { "mpegh" } else { self.decoder.codec_name() }
     }
 
     /// Drains queued FrameData into the render pipeline once started.
@@ -1113,6 +1139,7 @@ mod tests {
     #[test]
     fn object_snapshot_waits_for_presentation_clock_and_evicts_consumed_events() {
         let object = ObjectEvent {
+            diffuse: 0.0,
             id: 7,
             sample_pos: 480,
             has_pos: true,
@@ -1143,6 +1170,7 @@ mod tests {
     #[test]
     fn object_snapshot_capacity_rejects_instead_of_dropping_future_events() {
         let event = ObjectEvent {
+            diffuse: 0.0,
             id: 1, sample_pos: 1, has_pos: true, pos: [0.0; 3], gain_db: 0.0,
             size: [0.0; 3], anchor: "room".into(), distance_m: None,
             distance_infinite: false, screen_factor: None, depth_factor: None, ramp_duration: 0,
