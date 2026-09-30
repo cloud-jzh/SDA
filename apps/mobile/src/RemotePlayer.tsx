@@ -62,6 +62,7 @@ export function RemotePlayer(p: Props) {
   const [volumeWidth, setVolumeWidth] = useState(1);
   const pager = useRef<ScrollView>(null);
   const playerScroll = useRef<ScrollView>(null);
+  const pagerLayoutWidth = useRef(0);
   const [adjustingVolume, setAdjustingVolume] = useState(false);
   const volumeGesture = useMemo(() => {
     const lockScrolling = (locked: boolean) => {
@@ -70,15 +71,22 @@ export function RemotePlayer(p: Props) {
       playerScroll.current?.setNativeProps({ scrollEnabled: !locked });
       setAdjustingVolume(locked);
     };
+    let sliderLeft = 0;
     const updateVolume = (x: number) => p.setVolume(Math.max(0, Math.min(1, x / volumeWidth)));
     return PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onStartShouldSetPanResponderCapture: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      // A swipe that starts outside the slider remains a page gesture.
+      onMoveShouldSetPanResponder: () => false,
       onShouldBlockNativeResponder: () => true,
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: event => { lockScrolling(true); updateVolume(event.nativeEvent.locationX); },
-      onPanResponderMove: event => updateVolume(event.nativeEvent.locationX),
+      onPanResponderGrant: event => {
+        sliderLeft = event.nativeEvent.pageX - event.nativeEvent.locationX;
+        lockScrolling(true);
+        updateVolume(event.nativeEvent.pageX - sliderLeft);
+      },
+      // Keep a fixed screen-space origin even when the finger leaves the view.
+      onPanResponderMove: (_, gesture) => updateVolume(gesture.moveX - sliderLeft),
       onPanResponderRelease: () => lockScrolling(false),
       onPanResponderTerminate: () => lockScrolling(false),
     });
@@ -112,9 +120,16 @@ export function RemotePlayer(p: Props) {
       </View>
       {button("···", "更多设置", showSettings)}
     </View>
-    <ScrollView ref={pager} horizontal pagingEnabled scrollEnabled={!adjustingVolume} showsHorizontalScrollIndicator={false}
-      onMomentumScrollEnd={event => setPage(Math.round(event.nativeEvent.contentOffset.x / pageWidth))}
-      onLayout={() => pager.current?.scrollTo({ x: page * pageWidth, animated: false })}>
+    <ScrollView ref={pager} horizontal pagingEnabled snapToInterval={pageWidth} snapToAlignment="start"
+      decelerationRate="fast" disableIntervalMomentum bounces={false} overScrollMode="never"
+      scrollEnabled={!adjustingVolume} showsHorizontalScrollIndicator={false}
+      onMomentumScrollEnd={event => setPage(Math.max(0, Math.min(2, Math.round(event.nativeEvent.contentOffset.x / pageWidth))))}
+      onLayout={event => {
+        const layoutWidth = event.nativeEvent.layout.width;
+        if (pagerLayoutWidth.current === layoutWidth) return;
+        pagerLayoutWidth.current = layoutWidth;
+        pager.current?.scrollTo({ x: page * pageWidth, animated: false });
+      }}>
       <ScrollView ref={playerScroll} scrollEnabled={!adjustingVolume} style={{ width: pageWidth }} contentContainerStyle={{ paddingBottom: 6 }}>
         <View style={[s.player, { width: coverSize, alignSelf: "center" }]}>
           <View style={[s.art, { height: coverSize, width: coverSize, alignSelf: "center", backgroundColor: c.panel }]}>
