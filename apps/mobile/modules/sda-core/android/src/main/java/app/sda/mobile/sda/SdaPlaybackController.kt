@@ -14,6 +14,7 @@ import java.util.Locale
 object SdaPlaybackController {
     @Volatile private var app: Context? = null
     @Volatile private var handle = 0L
+    @Volatile private var output: Media3Output? = null
     @Volatile private var feedThread: Thread? = null
     @Volatile var stopped = false
         private set
@@ -83,8 +84,16 @@ object SdaPlaybackController {
         check(SdaEngine.nativeHrtfLoaded(ptr)) { "native engine did not confirm KU100 load" }
         handle = ptr
         hrtfLoadStatus = "KU100 D1 已由 native 加载"
-        val started = SdaEngine.nativeStart(ptr)
-        if (started != 0) { SdaEngine.nativeClose(ptr); handle = 0L; error("nativeStart failed: $started") }
+        val output = Media3Output(context.applicationContext)
+        this.output = output
+        val started = SdaEngine.nativeStart(ptr, output)
+        if (started != 0) {
+            output.close()
+            this.output = null
+            SdaEngine.nativeClose(ptr)
+            handle = 0L
+            error("nativeStart failed: $started")
+        }
         ptr
     }
 
