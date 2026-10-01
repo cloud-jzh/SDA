@@ -795,7 +795,7 @@ mod tests {
     fn mobile_near_field_acknowledges_applied_state_and_rejects_invalid_scale() {
         let mut engine = MobileEngine::new(EngineConfig::default(), None).unwrap();
         engine.load_hrtf(concat!(env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/mobile/android/app/src/main/assets/hrtf-dense/hrtf-set.json")).unwrap();
+            "/../../apps/desktop/native-renderer/hrtf-assets/hrtf-dense/hrtf-set.json")).unwrap();
         engine.start(Arc::new(MobileTestOutput)).unwrap();
         engine.set_near_field(true, 1.0).unwrap();
         assert!(engine.playback_status().near_field_enabled);
@@ -814,7 +814,7 @@ mod tests {
         let mut engine = MobileEngine::new(EngineConfig { direct_object_hrtf: true,
             directional_hrtf: true, ..EngineConfig::default() }, None).unwrap();
         engine.load_hrtf(concat!(env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/mobile/android/app/src/main/assets/hrtf-dense/hrtf-set.json")).unwrap();
+            "/../../apps/desktop/native-renderer/hrtf-assets/hrtf-dense/hrtf-set.json")).unwrap();
         engine.start(Arc::new(MobileTestOutput)).unwrap();
         let sample = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"),
             "/../../apps/mobile/android/app/src/main/assets/joc_atmos_1s.eac3")).unwrap();
