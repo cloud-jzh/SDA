@@ -13,7 +13,8 @@
 //! RenderCommand::PcmFrame  →  sda_native_renderer::spawn_render_worker
 //!     │
 //!     ▼
-//! StereoFifo → AudioOutput (Android: AAudio; desktop: CpalOutput; tests:
+//! StereoFifo → AudioOutput (Android app: Media3Output via JNI; Android
+//!             diagnostics: AAudio; desktop: CpalOutput; tests:
 //!             WavDumpOutput)  +  install_event_sink(...) for ACK/activity
 //! ```
 //!
@@ -216,7 +217,8 @@ impl MobileEngine {
 
     /// Start the render worker and hand the FIFO to `output`. Call once,
     /// before playback. `output` implementations: `CpalOutput` (desktop),
-    /// AAudio sink (Android, T2.2), `WavDumpOutput` (tests).
+    /// `Media3Output` (Android app, via JNI), `AAudioWriterSink` (Android
+    /// diagnostics), `WavDumpOutput` (tests).
     pub fn start(&mut self, output: Arc<dyn AudioOutput>) -> EngineResult<()> {
         if self.pipeline.is_some() {
             return Err("engine already started".into());
@@ -617,8 +619,9 @@ impl MobileEngine {
             .map_err(|_| "command queue full".into())
     }
 
-        /// Start with the platform output: AAudio blocking-write sink (T2.2).
-    /// Android only; hosts elsewhere construct their own AudioOutput.
+    /// Diagnostic entry: start with the AAudio blocking-write sink. The app
+    /// itself starts through JNI `nativeStart` with a Kotlin `Media3Output`;
+    /// hosts elsewhere construct their own AudioOutput.
     #[cfg(target_os = "android")]
     pub fn start_android(&mut self) -> EngineResult<()> {
         self.start(Arc::new(sda_native_renderer::aaudio_output::AAudioWriterSink::default()))

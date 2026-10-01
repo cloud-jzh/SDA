@@ -223,7 +223,7 @@ pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeResetHeadPose(
     }
 }
 
-/// `nativeStart(ptr: Long): Int` — 0 on success.
+/// `nativeStart(ptr: Long, output: Media3Output): Int` — 0 on success.
 #[no_mangle]
 pub extern "system" fn Java_com_sda_nativebridge_SdaEngine_nativeStart(
     env: JNIEnv,

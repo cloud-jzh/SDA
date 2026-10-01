@@ -285,7 +285,8 @@ pub fn install_event_sink(sink: Arc<dyn EventSink>) {
 
 /// Consumer of rendered stereo frames: pulls from the engine FIFO and
 /// delivers them to a platform device. Desktop sidecar: [`CpalOutput`].
-/// Android (T2.2): AAudio. Host verification: [`WavDumpOutput`].
+/// Android app: Media3Output (JNI-backed, defined in sda-native);
+/// diagnostics: AAudioWriterSink. Host verification: [`WavDumpOutput`].
 pub trait AudioOutput: Send + Sync {
     fn run(
         self: Arc<Self>,
